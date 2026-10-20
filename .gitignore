@@ -18,6 +18,7 @@ web-build/
 *.p8
 *.p12
 *.key
+*.keystore
 *.mobileprovision
 *.orig.*
 
@@ -46,6 +47,9 @@ minio-data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal
+
+# Local Verification Artifacts & Test Evidence (Never Commit)
+artifacts/
 
 # Logs
 logs/
