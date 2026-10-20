@@ -47,7 +47,7 @@ describe('Stage 6G Workstream A: Change Ledger Foundation Suite', () => {
       .values({
         source_complaint_id: id,
         source_system_id: seeded.complaintSourceId,
-        external_ticket_id: `TKT-${Date.now()}-${id.slice(0, 8)}`,
+        external_ticket_id: `TKT-${id}`,
         school_id: seeded.schoolId,
         original_title: 'Test Issue',
         registered_at: new Date(),
