@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "ZENTRA Field",
+    "slug": "zentra-field",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zentra.field.dev"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      },
+      "package": "com.zentra.field.dev"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "ZENTRA Field requires GPS location access to verify school proximity and validate coordinate accuracy for field audits."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "ZENTRA Field requires camera access to capture equipment diagnostics and service photos."
+        }
+      ]
+    ]
+  }
+}

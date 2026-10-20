@@ -1,0 +1,33 @@
+{
+  "name": "zentra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ZENTRA — Hi-Tech Lab Field Service Management Platform",
+  "packageManager": "pnpm@12.9.1",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
+    "format:fix": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "clean": "turbo run clean",
+    "dev:api": "turbo run dev --filter=@zentra/api",
+    "dev:web": "turbo run dev --filter=@zentra/web",
+    "dev:field": "turbo run dev --filter=@zentra/field",
+    "test:contracts": "turbo run test --filter=@zentra/contracts",
+    "test:api": "turbo run test --filter=@zentra/api",
+    "test:web": "turbo run test --filter=@zentra/web"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "turbo": "^2.1.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

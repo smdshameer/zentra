@@ -1,0 +1,17 @@
+# ==============================================================================
+# ZENTRA Staging — Example Remote Backend Configuration Template
+# ==============================================================================
+# Usage:
+#   1. Once staging AWS credentials (BLK-STG-01) and backend S3/DynamoDB
+#      infrastructure are provisioned, copy this file to 'backend.hcl':
+#        cp backend.hcl.example backend.hcl
+#   2. Fill in the authorized staging bucket name and DynamoDB lock table name.
+#   3. Initialize Terraform with the backend configuration:
+#        terraform init -backend-config=backend.hcl
+# ==============================================================================
+
+bucket         = "<ZENTRA_STAGING_TERRAFORM_STATE_BUCKET>"
+key            = "staging/terraform.tfstate"
+region         = "ap-south-1"
+dynamodb_table = "<ZENTRA_STAGING_TERRAFORM_LOCK_TABLE>"
+encrypt        = true

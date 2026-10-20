@@ -1,0 +1,17 @@
+# ==============================================================================
+# ZENTRA Staging — Example Terraform Variables Configuration
+# ==============================================================================
+
+aws_region               = "ap-south-1"
+environment              = "staging"
+project_name             = "zentra"
+vpc_cidr                 = "10.100.0.0/16"
+availability_zones       = ["ap-south-1a", "ap-south-1b"]
+db_instance_class        = "db.t4g.medium"
+db_allocated_storage     = 50
+db_max_allocated_storage = 200
+db_backup_retention_days = 7
+single_nat_gateway       = true
+
+# Set this only once the authoritative staging domain has been delegated (resolving BLK-STG-02)
+# staging_domain         = "staging.zentra.gov.in"

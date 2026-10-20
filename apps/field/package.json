@@ -1,0 +1,40 @@
+{
+  "name": "@zentra/field",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ZENTRA — Mobile Field Service Application (React Native + Expo CNG)",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild": "expo prebuild --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rimraf .expo dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@babel/runtime": "7.26.0",
+    "@nozbe/watermelondb": "^0.28.0",
+    "@react-native-community/netinfo": "11.4.1",
+    "@zentra/config": "workspace:*",
+    "@zentra/contracts": "workspace:*",
+    "@zentra/shared": "workspace:*",
+    "@zentra/types": "workspace:*",
+    "expo": "~52.0.37",
+    "expo-camera": "~16.0.18",
+    "expo-location": "~18.0.10",
+    "expo-secure-store": "~14.0.1",
+    "expo-status-bar": "~2.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.9"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/node": "^26.6.4",
+    "@types/react": "~18.3.12",
+    "rimraf": "^5.0.10",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}

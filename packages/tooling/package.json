@@ -1,0 +1,9 @@
+{
+  "name": "@zentra/tooling",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ZENTRA — Shared Developer and Build Tooling Configurations",
+  "files": [
+    "tsconfig.*.json"
+  ]
+}
