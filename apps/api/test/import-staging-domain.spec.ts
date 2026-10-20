@@ -54,6 +54,7 @@ import { TokenService } from '../src/modules/auth/token.service';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { generateUuidV7 } from '@zentra/shared';
 import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import { runMigrationsToLatest } from '../src/database/migration-runner';
 
 const TEST_DB_URL =
   process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
@@ -81,6 +82,12 @@ describe('ZENTRA Phase 8 — Staged Ingestion & Duplicate Classification Subsyst
     process.env.DATABASE_URL = TEST_DB_URL;
     assertTestEnvironmentIsSafe();
     assertTestDatabaseIsSafe(TEST_DB_URL);
+
+    // Run migrations to ensure latest schema
+    const migrationResult = await runMigrationsToLatest(TEST_DB_URL);
+    if (migrationResult.error) {
+      throw migrationResult.error;
+    }
 
     const { createDatabaseConnection } = await import('../src/database/database.connection');
     db = createDatabaseConnection(TEST_DB_URL);
