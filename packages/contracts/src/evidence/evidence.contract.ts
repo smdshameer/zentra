@@ -64,6 +64,7 @@ export const DEFAULT_PRESIGNED_EXPIRATION_SECONDS = 900;
 
 /** Request Upload Session Contract (Client -> Server) */
 export const createEvidenceUploadSessionSchema = z.object({
+  clientEvidenceId: uuidv7Schema.optional(),
   visitId: uuidv7Schema,
   serviceCaseId: uuidv7Schema,
   evidenceSlot: evidenceSlotSchema,

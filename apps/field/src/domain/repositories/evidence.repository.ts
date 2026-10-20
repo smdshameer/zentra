@@ -363,7 +363,11 @@ export class FieldEvidenceRepository {
         if (byServer.length > 0 && byServer[0]!.serverId) serverCaseId = byServer[0]!.serverId;
       }
 
+      const clientEvidenceId =
+        evidence.serverId && isValidUuid(evidence.serverId) ? evidence.serverId : undefined;
+
       const sessionRequest: CreateEvidenceUploadSessionDto = {
+        clientEvidenceId,
         visitId: serverVisitId as any,
         serviceCaseId: serverCaseId as any,
         evidenceSlot: evidence.evidenceSlot as any,

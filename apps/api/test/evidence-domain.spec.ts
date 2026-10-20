@@ -1064,4 +1064,244 @@ describe('ZENTRA Phase 14 — Evidence Pipeline & Direct S3 Streaming', () => {
       expect(unverifiedBody.error?.message || unverifiedBody.message).toContain('EVIDENCE_NOT_FINALIZED');
     });
   });
+
+  // ==========================================================
+  // SECTION 7: WORKSTREAM B — EVIDENCE IDENTITY UNIFICATION
+  // ==========================================================
+  describe('7. Stage 6G Workstream B — Evidence Identity Unification', () => {
+    it('unifies offline sync LOCAL_CAPTURED record with direct upload session', async () => {
+      const clientEvidenceId = generateUuidV7();
+      const initialChecksum = '0'.repeat(64);
+      const newChecksum = crypto.createHash('sha256').update('unified-payload').digest('hex');
+
+      // 1. Simulate offline sync insertion of LOCAL_CAPTURED evidence record
+      await db
+        .insertInto('evidence_files')
+        .values({
+          evidence_file_id: clientEvidenceId,
+          visit_id: activeVisitId,
+          service_case_id: activeCaseId,
+          evidence_slot: 'DIAGNOSTIC_PHOTO',
+          storage_path: `evidence/offline/${clientEvidenceId}.jpg`,
+          file_checksum_sha256: initialChecksum,
+          file_size_bytes: 1024,
+          mime_type: 'image/jpeg',
+          captured_at: new Date(),
+          upload_status: 'LOCAL_CAPTURED',
+          object_storage_provider: 'S3',
+          evidence_type: 'PHOTO',
+          created_by_user_id: primaryEngineerId,
+          version: 1,
+          is_verified: false,
+          is_tombstoned: false,
+          is_deleted: false,
+        })
+        .execute();
+
+      // 2. Mobile client comes online and requests upload session supplying clientEvidenceId
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: {
+          authorization: `Bearer ${primaryEngineerToken}`,
+        },
+        payload: {
+          clientEvidenceId,
+          visitId: activeVisitId,
+          serviceCaseId: activeCaseId,
+          evidenceSlot: 'DIAGNOSTIC_PHOTO',
+          evidenceType: 'PHOTO',
+          mimeType: 'image/jpeg',
+          fileSizeBytes: 2048,
+          fileChecksumSha256: newChecksum,
+          capturedAt: new Date().toISOString(),
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const body = JSON.parse(res.payload);
+      expect(body.data.evidenceId).toBe(clientEvidenceId);
+      expect(body.data.storagePath).toBeDefined();
+
+      // 3. Verify database record was updated in-place (no duplicate row)
+      const rows = await db
+        .selectFrom('evidence_files')
+        .selectAll()
+        .where('evidence_file_id', '=', clientEvidenceId)
+        .execute();
+
+      expect(rows.length).toBe(1);
+      const row = rows[0]!;
+      expect(row.upload_status).toBe('UPLOAD_SESSION_CREATED');
+      expect(row.file_checksum_sha256).toBe(newChecksum);
+      expect(Number(row.file_size_bytes)).toBe(2048);
+      expect(row.version).toBe(2);
+      expect(row.storage_path).toBe(body.data.storagePath);
+    });
+
+    it('idempotently handles repeated upload session request for UPLOAD_SESSION_CREATED', async () => {
+      const clientEvidenceId = generateUuidV7();
+      const checksum = crypto.createHash('sha256').update('idempotent-payload').digest('hex');
+
+      const payload = {
+        clientEvidenceId,
+        visitId: activeVisitId,
+        serviceCaseId: activeCaseId,
+        evidenceSlot: 'PARTS_SPARES_PHOTO',
+        evidenceType: 'PHOTO',
+        mimeType: 'image/jpeg',
+        fileSizeBytes: 4096,
+        fileChecksumSha256: checksum,
+        capturedAt: new Date().toISOString(),
+      };
+
+      // First call creates upload session
+      const res1 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: { authorization: `Bearer ${primaryEngineerToken}` },
+        payload,
+      });
+      expect(res1.statusCode).toBe(201);
+      const body1 = JSON.parse(res1.payload);
+      expect(body1.data.evidenceId).toBe(clientEvidenceId);
+
+      // Second call idempotently refreshes upload session for same clientEvidenceId
+      const res2 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: { authorization: `Bearer ${primaryEngineerToken}` },
+        payload,
+      });
+      expect(res2.statusCode).toBe(201);
+      const body2 = JSON.parse(res2.payload);
+      expect(body2.data.evidenceId).toBe(clientEvidenceId);
+    });
+
+    it('rejects identity conflict when existing record attributes do not match', async () => {
+      const clientEvidenceId = generateUuidV7();
+      const checksum = crypto.createHash('sha256').update('conflict-payload').digest('hex');
+
+      // Create record with slot DIAGNOSTIC_PHOTO
+      await db
+        .insertInto('evidence_files')
+        .values({
+          evidence_file_id: clientEvidenceId,
+          visit_id: activeVisitId,
+          service_case_id: activeCaseId,
+          evidence_slot: 'DIAGNOSTIC_PHOTO',
+          storage_path: `evidence/offline/${clientEvidenceId}.jpg`,
+          file_checksum_sha256: checksum,
+          file_size_bytes: 1024,
+          mime_type: 'image/jpeg',
+          captured_at: new Date(),
+          upload_status: 'LOCAL_CAPTURED',
+          object_storage_provider: 'S3',
+          evidence_type: 'PHOTO',
+          created_by_user_id: primaryEngineerId,
+          version: 1,
+          is_verified: false,
+          is_tombstoned: false,
+          is_deleted: false,
+        })
+        .execute();
+
+      // Attempt upload session with DIFFERENT slot
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: { authorization: `Bearer ${primaryEngineerToken}` },
+        payload: {
+          clientEvidenceId,
+          visitId: activeVisitId,
+          serviceCaseId: activeCaseId,
+          evidenceSlot: 'SERIAL_NUMBER_PHOTO', // Mismatched!
+          evidenceType: 'PHOTO',
+          mimeType: 'image/jpeg',
+          fileSizeBytes: 1024,
+          fileChecksumSha256: checksum,
+          capturedAt: new Date().toISOString(),
+        },
+      });
+
+      expect(res.statusCode).toBe(409);
+      const body = JSON.parse(res.payload);
+      expect(body.error?.message || body.message).toContain('IDENTITY_CONFLICT');
+    });
+
+    it('rejects upload session creation for already finalized record', async () => {
+      const clientEvidenceId = generateUuidV7();
+      const checksum = crypto.createHash('sha256').update('finalized-payload').digest('hex');
+
+      // Create already FINALIZED record
+      await db
+        .insertInto('evidence_files')
+        .values({
+          evidence_file_id: clientEvidenceId,
+          visit_id: activeVisitId,
+          service_case_id: activeCaseId,
+          evidence_slot: 'OTHER_ATTACHMENT',
+          storage_path: `cases/${activeCaseId}/visits/${activeVisitId}/finalized.jpg`,
+          file_checksum_sha256: checksum,
+          file_size_bytes: 1024,
+          mime_type: 'image/jpeg',
+          captured_at: new Date(),
+          upload_status: 'FINALIZED',
+          object_storage_provider: 'S3',
+          evidence_type: 'PHOTO',
+          created_by_user_id: primaryEngineerId,
+          version: 1,
+          is_verified: false,
+          is_tombstoned: false,
+          is_deleted: false,
+        })
+        .execute();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: { authorization: `Bearer ${primaryEngineerToken}` },
+        payload: {
+          clientEvidenceId,
+          visitId: activeVisitId,
+          serviceCaseId: activeCaseId,
+          evidenceSlot: 'OTHER_ATTACHMENT',
+          evidenceType: 'PHOTO',
+          mimeType: 'image/jpeg',
+          fileSizeBytes: 1024,
+          fileChecksumSha256: checksum,
+          capturedAt: new Date().toISOString(),
+        },
+      });
+
+      expect(res.statusCode).toBe(409);
+      const body = JSON.parse(res.payload);
+      expect(body.error?.message || body.message).toContain('INVALID_STATE_TRANSITION');
+    });
+
+    it('generates a fresh server UUIDv7 when clientEvidenceId is omitted', async () => {
+      const checksum = crypto.createHash('sha256').update('omitted-payload').digest('hex');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/evidence/upload-session',
+        headers: { authorization: `Bearer ${primaryEngineerToken}` },
+        payload: {
+          visitId: activeVisitId,
+          serviceCaseId: activeCaseId,
+          evidenceSlot: 'OTHER_ATTACHMENT',
+          evidenceType: 'PHOTO',
+          mimeType: 'image/jpeg',
+          fileSizeBytes: 1024,
+          fileChecksumSha256: checksum,
+          capturedAt: new Date().toISOString(),
+        },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const body = JSON.parse(res.payload);
+      expect(body.data.evidenceId).toBeDefined();
+      expect(typeof body.data.evidenceId).toBe('string');
+    });
+  });
 });

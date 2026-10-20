@@ -10,7 +10,7 @@
  * - Streams both service_cases and field_visits
  */
 
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, HttpException, HttpStatus } from '@nestjs/common';
 import { decodeSyncCursor, encodeSyncCursor } from '../utils/sync-cursor';
 import { RlsService } from '../../auth/rls.service';
 import { resolveSecurityRole } from '../utils/sync-roles';
@@ -43,7 +43,8 @@ export class SyncDeltaService {
     return await this.rlsService.withSecurityContext(
       { userId, role },
       async (trx) => {
-        const { timestamp, tombstoneSeq } = decodeSyncCursor(query.cursor);
+        const decoded = decodeSyncCursor(query.cursor);
+        const { timestamp, tombstoneSeq, changeSeq, isLedgerCursor } = decoded;
         const cursorDate = new Date(timestamp);
         const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
 
@@ -65,6 +66,115 @@ export class SyncDeltaService {
           assignedDistrictIds = userAssignments.map((a) => a.district_id);
         }
 
+        // --- Stage 6G Change Ledger Execution Path ---
+        if (isLedgerCursor) {
+          // 1. Watermark Retention Check
+          const watermark = await trx
+            .selectFrom('sync_retention_watermark')
+            .where('watermark_id', '=', 1)
+            .selectAll()
+            .executeTakeFirst();
+
+          if (watermark) {
+            const minAvailableSeq = Number(watermark.min_available_seq ?? 1);
+            const purgedThroughSeq = Number(watermark.purged_through_seq ?? 0);
+            if (purgedThroughSeq > 0 && changeSeq < minAvailableSeq) {
+              throw new HttpException(
+                {
+                  statusCode: 410,
+                  error: 'Gone',
+                  errorCode: 'CURSOR_EXPIRED_FULL_RESYNC_REQUIRED',
+                  message:
+                    'Delta cursor is older than the retention window. Complete local database re-sync is required.',
+                },
+                HttpStatus.GONE,
+              );
+            }
+          }
+
+          // 2. Query sync_change_ledger
+          let ledgerQuery = trx
+            .selectFrom('sync_change_ledger')
+            .where('event_seq', '>', changeSeq)
+            .selectAll()
+            .orderBy('event_seq', 'asc')
+            .limit(limit + 1);
+
+          if (!isMasterOrReporting) {
+            if (userRoles.includes('FIELD_ENGINEER')) {
+              ledgerQuery = ledgerQuery.where((eb) =>
+                eb.or([
+                  eb('engineer_id', '=', userId),
+                  eb('recipient_user_id', '=', userId),
+                  eb(
+                    'district_id',
+                    'in',
+                    assignedDistrictIds.length > 0
+                      ? assignedDistrictIds
+                      : ['00000000-0000-0000-0000-000000000000'],
+                  ),
+                ]),
+              );
+            } else if (userRoles.includes('DISTRICT_COORDINATOR')) {
+              const districtList =
+                assignedDistrictIds.length > 0
+                  ? assignedDistrictIds
+                  : ['00000000-0000-0000-0000-000000000000'];
+              ledgerQuery = ledgerQuery.where('district_id', 'in', districtList);
+            }
+          }
+
+          const fetchedEvents = await ledgerQuery.execute();
+          const hasMore = fetchedEvents.length > limit;
+          const events = hasMore ? fetchedEvents.slice(0, limit) : fetchedEvents;
+
+          const changes: SyncDeltaChangeItem[] = [];
+          const tombstones: SyncTombstoneItem[] = [];
+
+          for (const ev of events) {
+            const rawData = (ev.data as Record<string, any>) ?? {};
+            if (ev.action === 'TOMBSTONE') {
+              tombstones.push({
+                entityType: ev.entity_type,
+                entityId: ev.entity_id,
+                deletedAt: new Date(ev.committed_at).toISOString(),
+                reason: rawData.reason ?? 'DELETED',
+              });
+            } else {
+              const formattedData = this.formatEntityData(ev.entity_type, rawData);
+              changes.push({
+                entityType: ev.entity_type,
+                entityId: ev.entity_id,
+                action: 'UPSERT',
+                version: String(ev.version ?? 1),
+                updatedAt: new Date(ev.committed_at).toISOString(),
+                data: formattedData,
+              });
+            }
+          }
+
+          let nextChangeSeq = changeSeq;
+          let latestTimestamp = cursorDate;
+          if (events.length > 0) {
+            nextChangeSeq = Number(events[events.length - 1]!.event_seq);
+            const newestDate = new Date(events[events.length - 1]!.committed_at);
+            if (newestDate > latestTimestamp) {
+              latestTimestamp = newestDate;
+            }
+          }
+
+          const nextCursor = encodeSyncCursor(latestTimestamp, tombstoneSeq, nextChangeSeq);
+
+          return {
+            changes,
+            tombstones,
+            nextCursor,
+            hasMore,
+            serverTimestamp: new Date().toISOString(),
+          };
+        }
+
+        // --- Fallback: Legacy Downstream Query Path ---
         // 1. Query changed service cases
         let casesQuery = trx
           .selectFrom('service_cases')
@@ -428,5 +538,241 @@ export class SyncDeltaService {
     };
       },
     );
+  }
+
+  private formatEntityData(
+    entityType: string,
+    raw: Record<string, any>,
+  ): Record<string, any> {
+    if (entityType === 'service_cases') {
+      return {
+        serviceCaseId: raw.serviceCaseId ?? raw.service_case_id,
+        zentraCaseCode: raw.zentraCaseCode ?? raw.zentra_case_code,
+        version: Number(raw.version ?? 1),
+        schoolId: raw.schoolId ?? raw.school_id,
+        labId: raw.labId ?? raw.lab_id,
+        labEquipmentId: raw.labEquipmentId ?? raw.lab_equipment_id,
+        sourceComplaintId: raw.sourceComplaintId ?? raw.source_complaint_id,
+        assignedPrimaryEngineerId:
+          raw.assignedPrimaryEngineerId ?? raw.assigned_primary_engineer_id,
+        assignedSecondaryEngineerId:
+          raw.assignedSecondaryEngineerId ?? raw.assigned_secondary_engineer_id,
+        operationalStatus: raw.operationalStatus ?? raw.operational_status,
+        internalPriority: raw.internalPriority ?? raw.internal_priority,
+        slaTargetAt: raw.slaTargetAt
+          ? new Date(raw.slaTargetAt).toISOString()
+          : raw.sla_target_at
+            ? new Date(raw.sla_target_at).toISOString()
+            : null,
+        actualDiagnosisSummary:
+          raw.actualDiagnosisSummary ?? raw.actual_diagnosis_summary,
+        actualActionTakenSummary:
+          raw.actualActionTakenSummary ?? raw.actual_action_taken_summary,
+        verificationStatus: raw.verificationStatus ?? raw.verification_status,
+        createdAt: new Date(raw.createdAt ?? raw.created_at).toISOString(),
+        updatedAt: new Date(raw.updatedAt ?? raw.updated_at).toISOString(),
+      };
+    }
+
+    if (entityType === 'field_visits') {
+      return {
+        visitId: raw.visitId ?? raw.visit_id,
+        serviceCaseId: raw.serviceCaseId ?? raw.service_case_id,
+        engineerId: raw.engineerId ?? raw.engineer_id,
+        visitSequenceNumber: Number(
+          raw.visitSequenceNumber ?? raw.visit_sequence_number ?? 1,
+        ),
+        visitDate:
+          raw.visitDate instanceof Date
+            ? raw.visitDate.toISOString().split('T')[0]!
+            : typeof raw.visit_date === 'string'
+              ? raw.visit_date.split('T')[0]!
+              : String(raw.visitDate ?? raw.visit_date),
+        status: raw.status,
+        checkInTimestamp: raw.checkInTimestamp
+          ? new Date(raw.checkInTimestamp).toISOString()
+          : raw.check_in_timestamp
+            ? new Date(raw.check_in_timestamp).toISOString()
+            : null,
+        checkInAtDevice: raw.checkInAtDevice
+          ? new Date(raw.checkInAtDevice).toISOString()
+          : raw.check_in_at_device
+            ? new Date(raw.check_in_at_device).toISOString()
+            : null,
+        checkInAtServer: raw.checkInAtServer
+          ? new Date(raw.checkInAtServer).toISOString()
+          : raw.check_in_at_server
+            ? new Date(raw.check_in_at_server).toISOString()
+            : null,
+        checkInLatitude:
+          raw.checkInLatitude !== undefined && raw.checkInLatitude !== null
+            ? Number(raw.checkInLatitude)
+            : raw.check_in_latitude !== null && raw.check_in_latitude !== undefined
+              ? Number(raw.check_in_latitude)
+              : null,
+        checkInLongitude:
+          raw.checkInLongitude !== undefined && raw.checkInLongitude !== null
+            ? Number(raw.checkInLongitude)
+            : raw.check_in_longitude !== null && raw.check_in_longitude !== undefined
+              ? Number(raw.check_in_longitude)
+              : null,
+        checkInAccuracyMeters:
+          raw.checkInAccuracyMeters !== undefined && raw.checkInAccuracyMeters !== null
+            ? Number(raw.checkInAccuracyMeters)
+            : raw.check_in_accuracy_meters !== null && raw.check_in_accuracy_meters !== undefined
+              ? Number(raw.check_in_accuracy_meters)
+              : null,
+        checkInDistanceMeters:
+          raw.checkInDistanceMeters !== undefined && raw.checkInDistanceMeters !== null
+            ? Number(raw.checkInDistanceMeters)
+            : raw.check_in_distance_meters !== null && raw.check_in_distance_meters !== undefined
+              ? Number(raw.check_in_distance_meters)
+              : null,
+        checkInWithinGeofence:
+          raw.checkInWithinGeofence !== undefined && raw.checkInWithinGeofence !== null
+            ? Boolean(raw.checkInWithinGeofence)
+            : raw.check_in_within_geofence !== null && raw.check_in_within_geofence !== undefined
+              ? Boolean(raw.check_in_within_geofence)
+              : null,
+        equipmentConditionObserved:
+          raw.equipmentConditionObserved ?? raw.equipment_condition_observed,
+        onSiteDiagnosis: raw.onSiteDiagnosis ?? raw.on_site_diagnosis,
+        workPerformed: raw.workPerformed ?? raw.work_performed,
+        visitOutcome: raw.visitOutcome ?? raw.visit_outcome,
+        pendingReasonText: raw.pendingReasonText ?? raw.pending_reason_text,
+        targetNextVisitDate: raw.targetNextVisitDate
+          ? String(raw.targetNextVisitDate)
+          : raw.target_next_visit_date
+            ? String(raw.target_next_visit_date)
+            : null,
+        checkOutTimestamp: raw.checkOutTimestamp
+          ? new Date(raw.checkOutTimestamp).toISOString()
+          : raw.check_out_timestamp
+            ? new Date(raw.check_out_timestamp).toISOString()
+            : null,
+        checkOutAtDevice: raw.checkOutAtDevice
+          ? new Date(raw.checkOutAtDevice).toISOString()
+          : raw.check_out_at_device
+            ? new Date(raw.check_out_at_device).toISOString()
+            : null,
+        checkOutAtServer: raw.checkOutAtServer
+          ? new Date(raw.checkOutAtServer).toISOString()
+          : raw.check_out_at_server
+            ? new Date(raw.check_out_at_server).toISOString()
+            : null,
+        checkOutLatitude:
+          raw.checkOutLatitude !== undefined && raw.checkOutLatitude !== null
+            ? Number(raw.checkOutLatitude)
+            : raw.check_out_latitude !== null && raw.check_out_latitude !== undefined
+              ? Number(raw.check_out_latitude)
+              : null,
+        checkOutLongitude:
+          raw.checkOutLongitude !== undefined && raw.checkOutLongitude !== null
+            ? Number(raw.checkOutLongitude)
+            : raw.check_out_longitude !== null && raw.check_out_longitude !== undefined
+              ? Number(raw.check_out_longitude)
+              : null,
+        checkOutAccuracyMeters:
+          raw.checkOutAccuracyMeters !== undefined && raw.checkOutAccuracyMeters !== null
+            ? Number(raw.checkOutAccuracyMeters)
+            : raw.check_out_accuracy_meters !== null && raw.check_out_accuracy_meters !== undefined
+              ? Number(raw.check_out_accuracy_meters)
+              : null,
+        notes: raw.notes,
+        version: Number(raw.version ?? 1),
+        clientOperationId: raw.clientOperationId ?? raw.client_operation_id,
+        createdAt: new Date(raw.createdAt ?? raw.created_at).toISOString(),
+        updatedAt: new Date(raw.updatedAt ?? raw.updated_at).toISOString(),
+      };
+    }
+
+    if (entityType === 'evidence_files') {
+      return {
+        evidenceId: raw.evidenceId ?? raw.evidence_file_id,
+        visitId: raw.visitId ?? raw.visit_id,
+        serviceCaseId: raw.serviceCaseId ?? raw.service_case_id,
+        evidenceSlot: raw.evidenceSlot ?? raw.evidence_slot,
+        evidenceType: raw.evidenceType ?? raw.evidence_type,
+        localMediaId: raw.localMediaId ?? raw.local_media_id,
+        storagePath: raw.storagePath ?? raw.storage_path,
+        objectStorageProvider:
+          raw.objectStorageProvider ?? raw.object_storage_provider,
+        mimeType: raw.mimeType ?? raw.mime_type,
+        fileSizeBytes: Number(raw.fileSizeBytes ?? raw.file_size_bytes ?? 0),
+        fileChecksumSha256: raw.fileChecksumSha256 ?? raw.file_checksum_sha256,
+        capturedAt: new Date(raw.capturedAt ?? raw.captured_at).toISOString(),
+        uploadedAt: raw.uploadedAt
+          ? new Date(raw.uploadedAt).toISOString()
+          : raw.uploaded_at
+            ? new Date(raw.uploaded_at).toISOString()
+            : null,
+        uploadStatus: raw.uploadStatus ?? raw.upload_status,
+        gpsLatitude:
+          raw.gpsLatitude !== undefined && raw.gpsLatitude !== null
+            ? Number(raw.gpsLatitude)
+            : raw.gps_latitude !== null && raw.gps_latitude !== undefined
+              ? Number(raw.gps_latitude)
+              : null,
+        gpsLongitude:
+          raw.gpsLongitude !== undefined && raw.gpsLongitude !== null
+            ? Number(raw.gpsLongitude)
+            : raw.gps_longitude !== null && raw.gps_longitude !== undefined
+              ? Number(raw.gps_longitude)
+              : null,
+        gpsAccuracyMeters:
+          raw.gpsAccuracyMeters !== undefined && raw.gpsAccuracyMeters !== null
+            ? Number(raw.gpsAccuracyMeters)
+            : raw.gps_accuracy_meters !== null && raw.gps_accuracy_meters !== undefined
+              ? Number(raw.gps_accuracy_meters)
+              : null,
+        isVerified: Boolean(raw.isVerified ?? raw.is_verified),
+        version: Number(raw.version ?? 1),
+        createdAt: new Date(raw.createdAt ?? raw.created_at).toISOString(),
+        updatedAt: new Date(raw.updatedAt ?? raw.updated_at).toISOString(),
+      };
+    }
+
+    if (entityType === 'conveyance_claims') {
+      return {
+        claimId: raw.claimId ?? raw.conveyance_claim_id,
+        fieldVisitId: raw.fieldVisitId ?? raw.visit_id,
+        engineerId: raw.engineerId ?? raw.engineer_id,
+        travelMode: raw.travelMode ?? raw.travel_mode,
+        startingOdometerKm:
+          raw.startingOdometerKm !== undefined && raw.startingOdometerKm !== null
+            ? Number(raw.startingOdometerKm)
+            : raw.starting_odometer_km !== null && raw.starting_odometer_km !== undefined
+              ? Number(raw.starting_odometer_km)
+              : null,
+        endingOdometerKm:
+          raw.endingOdometerKm !== undefined && raw.endingOdometerKm !== null
+            ? Number(raw.endingOdometerKm)
+            : raw.ending_odometer_km !== null && raw.ending_odometer_km !== undefined
+              ? Number(raw.ending_odometer_km)
+              : null,
+        claimedDistanceKm: Number(raw.claimedDistanceKm ?? raw.claimed_distance_km ?? 0),
+        appliedRatePerKm: Number(raw.appliedRatePerKm ?? raw.applied_rate_per_km ?? 0),
+        calculatedAmount: Number(raw.calculatedAmount ?? raw.calculated_amount ?? 0),
+        approvedAmount:
+          raw.approvedAmount !== undefined && raw.approvedAmount !== null
+            ? Number(raw.approvedAmount)
+            : raw.approved_amount !== null && raw.approved_amount !== undefined
+              ? Number(raw.approved_amount)
+              : null,
+        status: raw.status ?? raw.claim_status,
+        ratePolicyVersion: Number(raw.ratePolicyVersion ?? raw.rate_policy_version ?? 1),
+        isProvisionalPolicy: Boolean(
+          raw.isProvisionalPolicy ?? raw.is_provisional_policy,
+        ),
+        notes: raw.notes ?? raw.remarks,
+        reviewerNotes: raw.reviewerNotes ?? raw.correction_notes,
+        rejectionReason: raw.rejectionReason ?? raw.rejection_reason,
+        version: Number(raw.version ?? 1),
+        createdAt: new Date(raw.createdAt ?? raw.created_at).toISOString(),
+        updatedAt: new Date(raw.updatedAt ?? raw.updated_at).toISOString(),
+      };
+    }
+
+    return raw;
   }
 }
