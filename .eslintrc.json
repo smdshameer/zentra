@@ -16,5 +16,5 @@
     "@typescript-eslint/no-explicit-any": "warn",
     "no-console": ["warn", { "allow": ["warn", "error", "info"] }]
   },
-  "ignorePatterns": ["dist/**", "build/**", "node_modules/**", ".turbo/**", "coverage/**", "*.js"]
+  "ignorePatterns": ["dist/**", "build/**", "**/dist/**", "**/build/**", "node_modules/**", ".turbo/**", "coverage/**", "*.js"]
 }

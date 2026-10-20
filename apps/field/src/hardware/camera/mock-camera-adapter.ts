@@ -94,8 +94,11 @@ export class MockCameraAdapter implements ICameraProvider {
     let localUri = `file:///data/user/0/com.zentra.field/cache/mock_photo_${id}.jpg`;
     if (typeof process !== 'undefined' && process.versions?.node) {
       try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- Node built-ins are needed only for Node test execution and must not become static imports in the React Native bundle
         const fs = require('node:fs');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- Node built-ins are needed only for Node test execution and must not become static imports in the React Native bundle
         const os = require('node:os');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- Node built-ins are needed only for Node test execution and must not become static imports in the React Native bundle
         const path = require('node:path');
         const tmpDir = path.join(os.tmpdir(), 'zentra_camera_mock');
         if (!fs.existsSync(tmpDir)) {

@@ -185,7 +185,7 @@ export class FieldEvidenceRepository {
     }
 
     const fileSizeBytes = actualSizeBytes;
-    let checksum = inspected.checksum;
+    const checksum = inspected.checksum;
 
     if (params.checksumSha256 && params.checksumSha256 !== checksum) {
       throw new Error(

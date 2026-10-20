@@ -56,7 +56,9 @@ describe('Milestone 1.1 Issue A — Explicit Visit ID and Service Case ID Scopin
       if (fs.existsSync(testTmpDir)) {
         fs.rmSync(testTmpDir, { recursive: true, force: true });
       }
-    } catch {}
+    } catch {
+      // Ignore temporary directory cleanup failure
+    }
   });
 
   const createBinaryPhoto = (name: string, content: string | Buffer): CapturedPhoto => {

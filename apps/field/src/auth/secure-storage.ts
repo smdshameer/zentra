@@ -90,6 +90,7 @@ export function getSecureStorage(customStorage?: ISecureStorage): ISecureStorage
 
   if (!activeStorageInstance) {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- preserve fallback when Expo SecureStore's native module is unavailable in Node/test environments
       const SecureStore = require('expo-secure-store');
       if (SecureStore && typeof SecureStore.getItemAsync === 'function') {
         activeStorageInstance = new ExpoSecureStoreAdapter();

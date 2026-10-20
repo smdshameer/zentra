@@ -56,7 +56,7 @@ describe('Phase 10 — Local Operation Queue Foundation', () => {
     });
 
     await queue.markInFlight(op.clientOperationId);
-    let pending = await queue.getPendingOperations();
+    const pending = await queue.getPendingOperations();
     expect(pending.length).toBe(0); // In flight operations are not in pending queue
 
     await queue.markAcknowledged(op.clientOperationId);

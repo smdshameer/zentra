@@ -57,6 +57,7 @@ export const errorCategorySchema = z.enum([
  * Sanitizes an input string: trims and strips control/null characters
  */
 export function sanitizeString(input: string): string {
+  // eslint-disable-next-line no-control-regex -- deliberate sanitization of ASCII control characters while preserving tabs and newlines
   return input.trim().replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 }
 

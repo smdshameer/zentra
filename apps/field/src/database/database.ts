@@ -23,6 +23,7 @@ export function createAppDatabase(options: DatabaseFactoryOptions = {}): Databas
 
   if (options.inMemory || typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') {
     // In-memory adapter for unit testing and headless environments
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- load the in-memory adapter conditionally for test/headless execution
     const LokiJSAdapter = require('@nozbe/watermelondb/adapters/lokijs').default;
     adapter = new LokiJSAdapter({
       schema: appDatabaseSchema,
@@ -34,6 +35,7 @@ export function createAppDatabase(options: DatabaseFactoryOptions = {}): Databas
   } else {
     // Native SQLite adapter on mobile devices with fallback to LokiJS
     try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- avoid eagerly loading the SQLite adapter where its Node dependency is unavailable
       const SQLiteAdapter = require('@nozbe/watermelondb/adapters/sqlite').default;
       adapter = new SQLiteAdapter({
         schema: appDatabaseSchema,
@@ -45,6 +47,7 @@ export function createAppDatabase(options: DatabaseFactoryOptions = {}): Databas
         },
       });
     } catch {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- load the in-memory adapter conditionally for test/headless execution
       const LokiJSAdapter = require('@nozbe/watermelondb/adapters/lokijs').default;
       adapter = new LokiJSAdapter({
         schema: appDatabaseSchema,

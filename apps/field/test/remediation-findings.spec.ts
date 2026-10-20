@@ -73,7 +73,9 @@ describe('Milestone 1.1 Remediation — Critical Field Workflow Defects (B-2, B-
       if (fs.existsSync(testTmpDir)) {
         fs.rmSync(testTmpDir, { recursive: true, force: true });
       }
-    } catch {}
+    } catch {
+      // Ignore temporary directory cleanup failure
+    }
   });
 
   const createBinaryFixturePhoto = (name: string, content: string | Buffer): CapturedPhoto => {

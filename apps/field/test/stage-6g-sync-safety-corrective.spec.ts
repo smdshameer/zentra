@@ -28,6 +28,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
+import { fileURLToPath } from 'node:url';
 import { createAppDatabase } from '../src/database/database';
 import { OperationQueue } from '../src/domain/queue/operation-queue';
 import { ServiceCaseRepository } from '../src/domain/repositories/service-case.repository';
@@ -698,7 +699,10 @@ describe('Stage 6G-B3-C1-R — Corrective Mobile Sync Safety Hardening Suite', (
       expect(payload.fileChecksumSha256).toBe(sha256);
 
       // 3. Verify file on disk is bit-for-bit unchanged
-      const rawFileBytes = fs.readFileSync(photo.localUri.replace(/^file:\/\/\/?/, ''));
+      const diskPath = photo.localUri.startsWith('file://')
+        ? fileURLToPath(photo.localUri)
+        : photo.localUri;
+      const rawFileBytes = fs.readFileSync(diskPath);
       const recomputedSha = crypto.createHash('sha256').update(rawFileBytes).digest('hex');
       expect(recomputedSha).toBe(sha256);
       expect(rawFileBytes.toString('utf-8')).toBe(uniqueBinaryData);

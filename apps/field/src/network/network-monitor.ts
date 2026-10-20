@@ -77,6 +77,7 @@ export class NetInfoNetworkMonitor implements INetworkMonitor {
 
   constructor() {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- preserve fallback when React Native NetInfo cannot load in Node/test environments
       const NetInfo = require('@react-native-community/netinfo');
       this.unsubscribeNetInfo = NetInfo.addEventListener((state: any) => {
         let status: NetworkStatus = 'UNKNOWN';
