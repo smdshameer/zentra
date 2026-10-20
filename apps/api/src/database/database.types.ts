@@ -477,6 +477,9 @@ export interface DatabaseSchema {
   field_visit_status_history: FieldVisitStatusHistoryTable;
   conveyance_rate_policies: ConveyanceRatePoliciesTable;
   conveyance_claims: ConveyanceClaimsTable;
+  sync_sequence_tracker: SyncSequenceTrackerTable;
+  sync_change_ledger: SyncChangeLedgerTable;
+  sync_retention_watermark: SyncRetentionWatermarkTable;
 }
 
 // 28. Service Case Status History
@@ -574,6 +577,34 @@ export interface ConveyanceClaimsTable {
   deleted_by_user_id: string | null; // UUID FK
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
+}
+
+// 33. Sync Sequence Tracker (Stage 6G Commit-Ordered Ledger)
+export interface SyncSequenceTrackerTable {
+  tracker_id: number;
+  current_seq: Generated<number | string>;
+}
+
+// 34. Sync Change Ledger (Stage 6G Commit-Ordered Ledger)
+export interface SyncChangeLedgerTable {
+  event_seq: number | string;
+  entity_type: string;
+  entity_id: string;
+  action: string;
+  version: Generated<number>;
+  district_id: string | null;
+  engineer_id: string | null;
+  recipient_user_id: string | null;
+  data: Record<string, unknown> | null;
+  committed_at: Generated<Date>;
+}
+
+// 35. Sync Retention Watermark (Stage 6G Commit-Ordered Ledger)
+export interface SyncRetentionWatermarkTable {
+  watermark_id: number;
+  min_available_seq: Generated<number | string>;
+  purged_through_seq: Generated<number | string>;
+  last_purged_at: Generated<Date>;
 }
 
 

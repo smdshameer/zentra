@@ -179,10 +179,12 @@ describe('Phase 14 — Mobile Field Evidence & Direct S3 Streaming', () => {
       });
 
       expect(mediaManager.get(tempItem.id)).toBeDefined();
+      const initialServerId = evidence.serverId;
 
       let requestedSession = false;
       let streamedDirectlyToS3 = false;
       let finalizedOnServer = false;
+      let sessionRequestBody: any = null;
 
       const mockSession: EvidenceUploadSession = {
         evidenceId: 'srv-evidence-001',
@@ -198,6 +200,9 @@ describe('Phase 14 — Mobile Field Evidence & Direct S3 Streaming', () => {
         const urlStr = url.toString();
         if (urlStr.includes('/evidence/upload-session')) {
           requestedSession = true;
+          if (_init?.body) {
+            sessionRequestBody = JSON.parse(_init.body as string);
+          }
           return {
             ok: true,
             status: 201,
@@ -242,6 +247,8 @@ describe('Phase 14 — Mobile Field Evidence & Direct S3 Streaming', () => {
       expect(result.status).toBe('FINALIZED');
       expect(result.serverEvidenceId).toBe('srv-evidence-001');
       expect(requestedSession).toBe(true);
+      expect(sessionRequestBody).toBeDefined();
+      expect(sessionRequestBody.clientEvidenceId).toBe(initialServerId);
       expect(streamedDirectlyToS3).toBe(true);
       expect(finalizedOnServer).toBe(true);
 

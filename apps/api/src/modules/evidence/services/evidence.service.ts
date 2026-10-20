@@ -113,7 +113,36 @@ export class EvidenceService {
       visitLineage.engineerId,
     );
 
-    // 3. Restricted Slot Uniqueness Enforcement
+    // 3. Evaluate clientEvidenceId for Identity Unification & Idempotency
+    const targetEvidenceId = dto.clientEvidenceId || generateUuidV7();
+    const existingRecord = dto.clientEvidenceId
+      ? await this.evidenceRepository.findById(dto.clientEvidenceId)
+      : null;
+
+    if (existingRecord) {
+      // 3a. Validate entity lineage and slot identity consistency
+      if (
+        existingRecord.visitId !== dto.visitId ||
+        existingRecord.serviceCaseId !== dto.serviceCaseId ||
+        existingRecord.evidenceSlot !== dto.evidenceSlot
+      ) {
+        throw new ConflictException(
+          `IDENTITY_CONFLICT: Existing evidence record attributes (visit=${existingRecord.visitId}, case=${existingRecord.serviceCaseId}, slot=${existingRecord.evidenceSlot}) do not match upload session request (visit=${dto.visitId}, case=${dto.serviceCaseId}, slot=${dto.evidenceSlot})`,
+        );
+      }
+
+      // 3b. Immutability guard: cannot re-initiate upload session on finalized/verified evidence
+      if (
+        existingRecord.uploadStatus === 'FINALIZED' ||
+        existingRecord.uploadStatus === 'VERIFIED'
+      ) {
+        throw new ConflictException(
+          `INVALID_STATE_TRANSITION: Cannot create upload session for already ${existingRecord.uploadStatus.toLowerCase()} evidence ${targetEvidenceId}`,
+        );
+      }
+    }
+
+    // 4. Restricted Slot Uniqueness Enforcement
     const isRestrictedSlot = RESTRICTED_EVIDENCE_SLOTS.includes(dto.evidenceSlot);
     if (isRestrictedSlot) {
       const existingActiveSlot = await this.evidenceRepository.findActiveByVisitAndSlot(
@@ -123,6 +152,7 @@ export class EvidenceService {
 
       if (
         existingActiveSlot &&
+        existingActiveSlot.evidenceId !== targetEvidenceId &&
         (existingActiveSlot.uploadStatus === 'FINALIZED' ||
           existingActiveSlot.uploadStatus === 'VERIFIED')
       ) {
@@ -132,15 +162,14 @@ export class EvidenceService {
       }
     }
 
-    // 4. File Size & Checksum Guardrails
+    // 5. File Size & Checksum Guardrails
     if (dto.fileSizeBytes > DEFAULT_MAX_EVIDENCE_FILE_SIZE_BYTES) {
       throw new BadRequestException(
         `FILE_SIZE_EXCEEDED: Maximum allowed evidence size is ${DEFAULT_MAX_EVIDENCE_FILE_SIZE_BYTES} bytes`,
       );
     }
 
-    // 5. Generate Server-Controlled Deterministic Object Key
-    const evidenceId = generateUuidV7();
+    // 6. Generate Server-Controlled Deterministic Object Key
     const env = process.env.NODE_ENV || 'dev';
     const extension = dto.mimeType === 'application/pdf' ? '.pdf' : dto.mimeType === 'image/png' ? '.png' : '.jpg';
     const filename = `${dto.evidenceSlot.toLowerCase()}_${Date.now()}${extension}`;
@@ -149,7 +178,7 @@ export class EvidenceService {
       environment: env,
       serviceCaseId: dto.serviceCaseId,
       visitId: dto.visitId,
-      evidenceId,
+      evidenceId: targetEvidenceId,
       filename,
       mimeType: dto.mimeType,
       fileSizeBytes: dto.fileSizeBytes,
@@ -158,41 +187,95 @@ export class EvidenceService {
 
     const userId = (currentUser as any).userId || (currentUser as any).sub;
 
-    // 6. Persist Initial Evidence Record (Status: UPLOAD_SESSION_CREATED)
-    await this.evidenceRepository.create({
-      evidence_file_id: evidenceId,
-      visit_id: dto.visitId,
-      service_case_id: dto.serviceCaseId,
-      evidence_slot: dto.evidenceSlot,
-      storage_path: uploadUrlResult.objectKey,
-      file_checksum_sha256: dto.fileChecksumSha256,
-      file_size_bytes: dto.fileSizeBytes,
-      mime_type: dto.mimeType,
-      captured_at: new Date(dto.capturedAt),
-      gps_latitude: dto.gpsLatitude !== undefined && dto.gpsLatitude !== null ? String(dto.gpsLatitude) : null,
-      gps_longitude: dto.gpsLongitude !== undefined && dto.gpsLongitude !== null ? String(dto.gpsLongitude) : null,
-      gps_accuracy_meters:
-        dto.gpsAccuracyMeters !== undefined && dto.gpsAccuracyMeters !== null
-          ? String(dto.gpsAccuracyMeters)
-          : null,
-      upload_status: 'UPLOAD_SESSION_CREATED',
-      object_storage_provider: 'S3',
-      evidence_type: dto.evidenceType || 'PHOTO',
-      local_media_id: dto.localMediaId || null,
-      created_by_user_id: userId,
-      version: 1,
-      client_operation_id: dto.clientOperationId || null,
-      is_verified: false,
-      is_tombstoned: false,
-      is_deleted: false,
-    });
+    // 7. Persist Initial Record or Update Existing Record (e.g. from LOCAL_CAPTURED sync)
+    if (existingRecord) {
+      await this.evidenceRepository.update(targetEvidenceId, {
+        upload_status: 'UPLOAD_SESSION_CREATED',
+        storage_path: uploadUrlResult.objectKey,
+        file_checksum_sha256: dto.fileChecksumSha256,
+        file_size_bytes: dto.fileSizeBytes,
+        mime_type: dto.mimeType,
+        version: (existingRecord.version ?? 1) + 1,
+      });
+    } else {
+      try {
+        await this.evidenceRepository.create({
+          evidence_file_id: targetEvidenceId,
+          visit_id: dto.visitId,
+          service_case_id: dto.serviceCaseId,
+          evidence_slot: dto.evidenceSlot,
+          storage_path: uploadUrlResult.objectKey,
+          file_checksum_sha256: dto.fileChecksumSha256,
+          file_size_bytes: dto.fileSizeBytes,
+          mime_type: dto.mimeType,
+          captured_at: new Date(dto.capturedAt),
+          gps_latitude: dto.gpsLatitude !== undefined && dto.gpsLatitude !== null ? String(dto.gpsLatitude) : null,
+          gps_longitude: dto.gpsLongitude !== undefined && dto.gpsLongitude !== null ? String(dto.gpsLongitude) : null,
+          gps_accuracy_meters:
+            dto.gpsAccuracyMeters !== undefined && dto.gpsAccuracyMeters !== null
+              ? String(dto.gpsAccuracyMeters)
+              : null,
+          upload_status: 'UPLOAD_SESSION_CREATED',
+          object_storage_provider: 'S3',
+          evidence_type: dto.evidenceType || 'PHOTO',
+          local_media_id: dto.localMediaId || null,
+          created_by_user_id: userId,
+          version: 1,
+          client_operation_id: dto.clientOperationId || null,
+          is_verified: false,
+          is_tombstoned: false,
+          is_deleted: false,
+        });
+      } catch (err: any) {
+        if (
+          err?.code === '23505' ||
+          err?.message?.includes('duplicate key') ||
+          err?.message?.includes('unique constraint') ||
+          err?.message?.includes('evidence_files_pkey')
+        ) {
+          // Concurrent creation race: another request or sync worker created this record concurrently.
+          const concurrentRecord = await this.evidenceRepository.findById(targetEvidenceId);
+          if (concurrentRecord) {
+            if (
+              concurrentRecord.visitId !== dto.visitId ||
+              concurrentRecord.serviceCaseId !== dto.serviceCaseId ||
+              concurrentRecord.evidenceSlot !== dto.evidenceSlot
+            ) {
+              throw new ConflictException(
+                `IDENTITY_CONFLICT: Concurrent evidence record attributes do not match upload session request`,
+              );
+            }
+            if (
+              concurrentRecord.uploadStatus === 'FINALIZED' ||
+              concurrentRecord.uploadStatus === 'VERIFIED'
+            ) {
+              throw new ConflictException(
+                `INVALID_STATE_TRANSITION: Cannot create upload session for already ${concurrentRecord.uploadStatus.toLowerCase()} evidence ${targetEvidenceId}`,
+              );
+            }
+            await this.evidenceRepository.update(targetEvidenceId, {
+              upload_status: 'UPLOAD_SESSION_CREATED',
+              storage_path: uploadUrlResult.objectKey,
+              file_checksum_sha256: dto.fileChecksumSha256,
+              file_size_bytes: dto.fileSizeBytes,
+              mime_type: dto.mimeType,
+              version: (concurrentRecord.version ?? 1) + 1,
+            });
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
+      }
+    }
 
     this.logger.log(
-      `Evidence upload session created: evidenceId=${evidenceId}, visitId=${dto.visitId}, slot=${dto.evidenceSlot}`,
+      `Evidence upload session created: evidenceId=${targetEvidenceId}, visitId=${dto.visitId}, slot=${dto.evidenceSlot}`,
     );
 
     return {
-      evidenceId,
+      evidenceId: targetEvidenceId,
       uploadSessionId: uploadUrlResult.uploadSessionId,
       presignedUploadUrl: uploadUrlResult.presignedUrl,
       storagePath: uploadUrlResult.objectKey,

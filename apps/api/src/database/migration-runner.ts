@@ -33,6 +33,7 @@ import * as m11 from './migrations/20261008000003_create_sync_and_idempotency';
 import * as m12 from './migrations/20261008000004_enhance_field_visits_and_lifecycle';
 import * as m13 from './migrations/20261008000005_enhance_evidence_files_and_s3_pipeline';
 import * as m14 from './migrations/20261008000006_create_conveyance_and_claims';
+import * as m15 from './migrations/20261020000001_create_sync_change_ledger';
 
 export class ExplicitMigrationProvider implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -51,6 +52,7 @@ export class ExplicitMigrationProvider implements MigrationProvider {
       '20261008000004_enhance_field_visits_and_lifecycle': m12,
       '20261008000005_enhance_evidence_files_and_s3_pipeline': m13,
       '20261008000006_create_conveyance_and_claims': m14,
+      '20261020000001_create_sync_change_ledger': m15,
     };
   }
 }

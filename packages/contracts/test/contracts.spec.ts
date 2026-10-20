@@ -4,6 +4,7 @@ import {
   createSuccessEnvelopeSchema,
   paginationMetaSchema,
 } from '../src/common/envelopes.contract';
+import { createEvidenceUploadSessionSchema } from '../src/evidence/evidence.contract';
 import { z } from 'zod';
 
 describe('Contracts Foundation Smoke Tests', () => {
@@ -60,5 +61,46 @@ describe('Contracts Foundation Smoke Tests', () => {
 
     const parsed = paginationMetaSchema.safeParse(invalidMeta);
     expect(parsed.success).toBe(false);
+  });
+
+  describe('createEvidenceUploadSessionSchema (Workstream B)', () => {
+    const basePayload = {
+      visitId: '01925b42-8e19-72aa-98ff-778899aabbcc',
+      serviceCaseId: '01925b42-8e19-72aa-98ff-778899aabbcd',
+      evidenceSlot: 'SLOT_1_HM_SIGNED_REPORT',
+      evidenceType: 'PHOTO',
+      mimeType: 'image/jpeg',
+      fileSizeBytes: 1024,
+      fileChecksumSha256: 'a'.repeat(64),
+    };
+
+    it('accepts payload with valid clientEvidenceId UUIDv7', () => {
+      const validPayload = {
+        ...basePayload,
+        clientEvidenceId: '01925b42-8e19-72aa-98ff-778899aabbce',
+      };
+      const parsed = createEvidenceUploadSessionSchema.safeParse(validPayload);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.clientEvidenceId).toBe('01925b42-8e19-72aa-98ff-778899aabbce');
+      }
+    });
+
+    it('accepts payload with omitted clientEvidenceId (backward compatibility)', () => {
+      const parsed = createEvidenceUploadSessionSchema.safeParse(basePayload);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.clientEvidenceId).toBeUndefined();
+      }
+    });
+
+    it('rejects payload with invalid clientEvidenceId', () => {
+      const invalidPayload = {
+        ...basePayload,
+        clientEvidenceId: 'not-a-uuid',
+      };
+      const parsed = createEvidenceUploadSessionSchema.safeParse(invalidPayload);
+      expect(parsed.success).toBe(false);
+    });
   });
 });
