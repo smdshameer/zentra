@@ -57,7 +57,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: zentra_test
+          POSTGRES_DB: zentra_test_disposable
         ports:
           - 5432:5432
         options: >-
@@ -86,13 +86,64 @@ jobs:
       - name: Build packages
         run: pnpm build
 
+      - name: Provision disposable test database
+        run: |
+          if command -v psql >/dev/null 2>&1; then
+            echo "Provisioning zentra_test_disposable via psql..."
+            PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'zentra_test_disposable'" | grep -q 1 || PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE zentra_test_disposable;"
+            PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'zentra_test'" | grep -q 1 || PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE zentra_test;"
+          else
+            echo "psql not found; provisioning databases via node..."
+            node -e "
+              const { Client } = require('./apps/api/node_modules/pg');
+              const client = new Client({ connectionString: 'postgresql://postgres:postgres@localhost:5432/postgres' });
+              async function main() {
+                await client.connect();
+                for (const db of ['zentra_test_disposable', 'zentra_test']) {
+                  const res = await client.query(\"SELECT 1 FROM pg_database WHERE datname = '\" + db + \"'\");
+                  if (res.rowCount === 0) {
+                    await client.query('CREATE DATABASE ' + db);
+                    console.log('Created database ' + db);
+                  } else {
+                    console.log('Database ' + db + ' already exists');
+                  }
+                }
+                await client.end();
+              }
+              main().catch(err => { console.error(err); process.exit(1); });
+            "
+          fi
+
+      - name: Verify disposable test database identity
+        run: |
+          if command -v psql >/dev/null 2>&1; then
+            echo "Verifying live connection to zentra_test_disposable via psql..."
+            PGPASSWORD=postgres psql -h localhost -U postgres -d zentra_test_disposable -c "SELECT current_database();"
+          else
+            node -e "
+              const { Client } = require('./apps/api/node_modules/pg');
+              const client = new Client({ connectionString: 'postgresql://postgres:postgres@localhost:5432/zentra_test_disposable' });
+              async function main() {
+                await client.connect();
+                const res = await client.query('SELECT current_database() AS db');
+                console.log('Verified connected database:', res.rows[0].db);
+                if (res.rows[0].db !== 'zentra_test_disposable') {
+                  throw new Error('Database identity mismatch: expected zentra_test_disposable, got ' + res.rows[0].db);
+                }
+                await client.end();
+              }
+              main().catch(err => { console.error(err); process.exit(1); });
+            "
+          fi
+
       - name: Run tests
         run: pnpm test
         env:
           NODE_ENV: test
           APP_ENV: test
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zentra_test
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zentra_test
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zentra_test_disposable
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/zentra_test_disposable
+          TEST_DB_URL: postgresql://postgres:postgres@localhost:5432/zentra_test_disposable
           JWT_ACCESS_SECRET: zentra-ci-test-access-secret-32chars-min!
           JWT_REFRESH_SECRET: zentra-ci-test-refresh-secret-32chars-min!
           OFFLINE_PERMIT_SIGNING_KEY: zentra-ci-test-permit-key-32chars-min!
