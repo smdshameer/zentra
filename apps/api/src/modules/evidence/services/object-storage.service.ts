@@ -81,7 +81,27 @@ export class ObjectStorageService {
   private readonly isTestEnvironment: boolean;
   private readonly logger = new Logger(ObjectStorageService.name);
 
-  /** In-memory mock storage registry for automated tests and offline development ONLY */
+  /**
+   * In-memory mock storage registry for automated tests and offline development ONLY.
+   *
+   * LIFECYCLE & PROCESS SCOPING NOTICE (Gate 6B-7M / SEC-EVID-TEST-01):
+   * This registry is an instance-local, volatile in-memory Map allocated per
+   * ObjectStorageService instance in Node.js process heap memory.
+   *
+   * KEY ARCHITECTURAL CONSTRAINTS:
+   * 1. Instance-Scoped: Each `new ObjectStorageService()` maintains its own independent
+   *    in-memory map. Data stored via `putObject` on instance A is NOT visible to instance B.
+   * 2. Volatile Lifecycle: Does NOT persist across Node.js process restarts, container restarts,
+   *    or separate execution contexts (e.g. separate CLI / audit scripts).
+   * 3. Test Contract Semantics: Successful verification (`verifyObjectIntegrity`) against this
+   *    adapter proves cryptographic payload integrity and pre-finalization checks ONLY within
+   *    the active process/instance lifetime. It does NOT assert or guarantee cross-process or
+   *    durable cloud object availability.
+   * 4. Production Boundary: In staging and production (`APP_ENV=staging|production`), this map
+   *    is strictly `null` and direct in-memory storage is fail-closed prohibited.
+   * 5. Persistent Storage Phase: Cross-process durable storage verification requires an S3-compatible
+   *    backend (or persistent filesystem mock), deferred to future infrastructure phases.
+   */
   private readonly testStorage: Map<
     string,
     { buffer: Buffer; contentType: string; checksumSha256: string; updatedAt: Date }
@@ -398,6 +418,9 @@ export class ObjectStorageService {
 
   /**
    * Directly stores a file buffer in the storage registry (Used for testing & direct streaming verification).
+   *
+   * Note: Stores into the instance-local `testStorage` Map. This data is volatile and exists only
+   * for the lifetime of this specific ObjectStorageService instance in process memory.
    */
   async putObject(
     objectKey: string,
@@ -435,7 +458,8 @@ export class ObjectStorageService {
   /**
    * Retrieves object metadata (HeadObject equivalent).
    * In production mode with S3 credentials: queries S3 via signed AWS SigV4 HEAD/GET requests.
-   * In test/in-memory mode: queries the internal testStorage registry.
+   * In test/in-memory mode: queries the internal instance-scoped testStorage registry.
+   * Returns null if the object does not exist in this instance's registry.
    */
   async headObject(objectKey: string): Promise<ObjectMetadata | null> {
     if (this.appEnv === 'staging' || this.appEnv === 'production') {
@@ -590,6 +614,10 @@ export class ObjectStorageService {
    * Verifies object presence and cryptographic SHA-256 upload integrity.
    * Rejects finalization if checksum mismatches or object is not found.
    * NEVER provides mock fallback: objects not found in storage are rejected with OBJECT_NOT_FOUND.
+   *
+   * In test mode, this verifies against this specific service instance's in-memory storage registry.
+   * Verification passing confirms in-process payload integrity prior to database finalization,
+   * but does not imply cross-process persistence.
    */
   async verifyObjectIntegrity(
     objectKey: string,
