@@ -229,6 +229,9 @@ jobs:
             -e JWT_REFRESH_SECRET=zentra-ci-test-refresh-secret-32chars-min! \
             -e OFFLINE_PERMIT_SIGNING_KEY=zentra-ci-test-permit-key-32chars-min! \
             -e S3_BUCKET_NAME=zentra-ci-test-evidence-vault \
+            -e S3_REGION=ap-south-1 \
+            -e S3_ACCESS_KEY=zentra-ci-test-access-key-id \
+            -e S3_SECRET_KEY=zentra-ci-test-secret-access-key-min40chars \
             zentra-api:ci-test
 
       - name: Verify container health endpoints
