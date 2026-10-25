@@ -1,8 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   assertTestEnvironmentIsSafe,
   assertTestDatabaseIsSafe,
   isTestDatabaseUrlSafe,
+  assertDisposableTestDatabaseUrl,
+  isDisposableTestDatabaseUrlSafe,
+  assertConnectedToDisposableDatabase,
+  setupDisposableIntegrationHarness,
+  CANONICAL_TEST_DATABASE,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
 } from '../src/production-gate';
 
 describe('Production Gate Circuit-Breaker Smoke Tests', () => {
@@ -477,6 +483,316 @@ describe('Database Test Safety Gate Regression Suite', () => {
           APP_ENV: undefined,
         }),
       ).not.toThrow();
+    });
+  });
+
+  describe('Disposable Integration Test Database Safety Guard Suite (Gate 6B-7P)', () => {
+    it('1. rejects zentra_test for the destructive integration-test path', () => {
+      const canonicalUrl = 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+      expect(() => assertDisposableTestDatabaseUrl(canonicalUrl)).toThrow(
+        /FAIL-CLOSED SAFETY GATE ABORT: Prohibited destructive test execution against protected canonical test database \[zentra_test\]/,
+      );
+      expect(isDisposableTestDatabaseUrlSafe(canonicalUrl)).toBe(false);
+    });
+
+    it('2. accepts zentra_test_disposable by the URL-name guard', () => {
+      const disposableUrl = 'postgresql://postgres:postgres@localhost:5432/zentra_test_disposable';
+      expect(() => assertDisposableTestDatabaseUrl(disposableUrl)).not.toThrow();
+      expect(assertDisposableTestDatabaseUrl(disposableUrl)).toBe('zentra_test_disposable');
+      expect(isDisposableTestDatabaseUrlSafe(disposableUrl)).toBe(true);
+
+      const ipUrl = 'postgresql://postgres:postgres@127.0.0.1:5432/zentra_test_disposable';
+      expect(() => assertDisposableTestDatabaseUrl(ipUrl)).not.toThrow();
+      expect(isDisposableTestDatabaseUrlSafe(ipUrl)).toBe(true);
+    });
+
+    it('3. rejects missing or malformed database URLs', () => {
+      expect(() => assertDisposableTestDatabaseUrl('')).toThrow(
+        /Test database URL is missing or empty/,
+      );
+      expect(() => assertDisposableTestDatabaseUrl(undefined)).toThrow(
+        /Test database URL is missing or empty/,
+      );
+      expect(() => assertDisposableTestDatabaseUrl(null)).toThrow(
+        /Test database URL is missing or empty/,
+      );
+      expect(() => assertDisposableTestDatabaseUrl('not-a-valid-url')).toThrow(
+        /Test database URL is malformed or invalid/,
+      );
+      expect(() =>
+        assertDisposableTestDatabaseUrl('mysql://localhost:5432/zentra_test_disposable'),
+      ).toThrow(/Prohibited database protocol/);
+      expect(isDisposableTestDatabaseUrlSafe('')).toBe(false);
+      expect(isDisposableTestDatabaseUrlSafe('not-a-valid-url')).toBe(false);
+    });
+
+    it('4. rejects unexpected database names', () => {
+      const devUrl = 'postgresql://postgres:postgres@localhost:5432/zentra_dev';
+      expect(() => assertDisposableTestDatabaseUrl(devUrl)).toThrow(
+        /Prohibited test database name \[zentra_dev\]/,
+      );
+
+      const prodUrl = 'postgresql://postgres:postgres@localhost:5432/production';
+      expect(() => assertDisposableTestDatabaseUrl(prodUrl)).toThrow(
+        /Prohibited test database name \[production\]/,
+      );
+
+      const otherUrl = 'postgresql://postgres:postgres@localhost:5432/other_db';
+      expect(() => assertDisposableTestDatabaseUrl(otherUrl)).toThrow(
+        /Prohibited test database name \[other_db\]/,
+      );
+
+      const remoteUrl =
+        'postgresql://postgres:postgres@ep-quiet-star.aws.neon.tech:5432/zentra_test_disposable';
+      expect(() => assertDisposableTestDatabaseUrl(remoteUrl)).toThrow(
+        /Prohibited remote host marker/,
+      );
+    });
+
+    it('5. aborts if active database connection is connected to zentra_test (protects canonical reconciliation state)', async () => {
+      const mockGetter = async () => 'zentra_test';
+      await expect(assertConnectedToDisposableDatabase(mockGetter)).rejects.toThrow(
+        /CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting protected canonical database \[zentra_test\]/,
+      );
+
+      const mockClient = {
+        query: async (querySql: string) => {
+          return { rows: [{ current_database: 'zentra_test' }] };
+        },
+      };
+      await expect(assertConnectedToDisposableDatabase(mockClient)).rejects.toThrow(
+        /CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting protected canonical database \[zentra_test\]/,
+      );
+    });
+
+    it('5b. aborts if active database connection is connected to an unexpected database', async () => {
+      const mockGetter = async () => 'postgres';
+      await expect(assertConnectedToDisposableDatabase(mockGetter)).rejects.toThrow(
+        /CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting \[postgres\], expected \[zentra_test_disposable\]/,
+      );
+
+      const mockEmpty = async () => '';
+      await expect(assertConnectedToDisposableDatabase(mockEmpty)).rejects.toThrow(
+        /Current database name could not be determined/,
+      );
+
+      await expect(assertConnectedToDisposableDatabase(null)).rejects.toThrow(
+        /Database connection or getter is required/,
+      );
+    });
+
+    it('6. passes the guard on mocked disposable connection without executing destructive statements and verifies CompiledQuery contract', async () => {
+      let destructiveSqlExecuted = false;
+      let receivedCompiledQuery: any = null;
+
+      const mockKyselyExecutor = {
+        executeQuery: async (compiled: any) => {
+          receivedCompiledQuery = compiled;
+          if (!Array.isArray(compiled?.parameters)) {
+            throw new TypeError('compiledQuery.parameters is not iterable');
+          }
+          if (typeof compiled?.sql !== 'string') {
+            throw new TypeError('compiledQuery.sql must be a string');
+          }
+          const queryText = compiled.sql || compiled?.query?.sqlFragments?.join(' ') || '';
+          if (
+            queryText.toUpperCase().includes('TRUNCATE') ||
+            queryText.toUpperCase().includes('DROP')
+          ) {
+            destructiveSqlExecuted = true;
+          }
+          return { rows: [{ current_database: 'zentra_test_disposable' }] };
+        },
+      };
+
+      const verifiedDb = await assertConnectedToDisposableDatabase(mockKyselyExecutor);
+      expect(verifiedDb).toBe('zentra_test_disposable');
+      expect(destructiveSqlExecuted).toBe(false);
+      expect(receivedCompiledQuery).toBeDefined();
+      expect(receivedCompiledQuery.sql).toBe('SELECT current_database() AS current_database');
+      expect(receivedCompiledQuery.parameters).toEqual([]);
+      expect(receivedCompiledQuery.query?.kind).toBe('RawNode');
+
+      const mockGetter = async () => 'zentra_test_disposable';
+      const verifiedFromGetter = await assertConnectedToDisposableDatabase(mockGetter);
+      expect(verifiedFromGetter).toBe('zentra_test_disposable');
+    });
+  });
+
+  describe('13. Shared Disposable Integration Test Harness (Gate 6B-7V)', () => {
+    const validDisposableUrl =
+      'postgresql://postgres:postgres@localhost:5432/zentra_test_disposable';
+    const canonicalUrl = 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+
+    const createMockConnection = (dbName: string = 'zentra_test_disposable') => {
+      let destructiveExecuted = false;
+      const client = {
+        query: async (sqlText: string) => {
+          if (
+            sqlText.toUpperCase().includes('TRUNCATE') ||
+            sqlText.toUpperCase().includes('DROP') ||
+            sqlText.toUpperCase().includes('DELETE')
+          ) {
+            destructiveExecuted = true;
+          }
+          return { rows: [{ current_database: dbName }] };
+        },
+        hasExecutedDestructive: () => destructiveExecuted,
+      };
+      return client;
+    };
+
+    it('1. rejects canonical zentra_test URL (fails closed before connection or migration)', async () => {
+      const mockFactory = vi.fn(() => createMockConnection());
+      const mockMigration = vi.fn(async () => {});
+
+      await expect(
+        setupDisposableIntegrationHarness(canonicalUrl, mockFactory, mockMigration),
+      ).rejects.toThrow(
+        /FAIL-CLOSED SAFETY GATE ABORT: Prohibited destructive test execution against protected canonical test database \[zentra_test\]/,
+      );
+
+      expect(mockFactory).not.toHaveBeenCalled();
+      expect(mockMigration).not.toHaveBeenCalled();
+    });
+
+    it('2. accepts zentra_test_disposable URL with valid connection and runs migrations after identity check', async () => {
+      const mockClient = createMockConnection('zentra_test_disposable');
+      const executionOrder: string[] = [];
+
+      const trackingClient = {
+        query: async (sqlText: string) => {
+          executionOrder.push('SELECT_CURRENT_DATABASE');
+          return mockClient.query(sqlText);
+        },
+      };
+
+      const mockMigration = vi.fn(async (url: string) => {
+        executionOrder.push('RUN_MIGRATIONS');
+      });
+
+      const harness = await setupDisposableIntegrationHarness({
+        testDbUrl: validDisposableUrl,
+        connection: () => trackingClient,
+        runMigrations: mockMigration,
+      });
+
+      expect(harness.dbName).toBe('zentra_test_disposable');
+      expect(harness.db).toBe(trackingClient);
+      expect(mockMigration).toHaveBeenCalledWith(validDisposableUrl);
+      expect(executionOrder).toEqual(['SELECT_CURRENT_DATABASE', 'RUN_MIGRATIONS']);
+    });
+
+    it('3. rejects missing or malformed URLs', async () => {
+      const mockFactory = vi.fn(() => createMockConnection());
+      const mockMigration = vi.fn(async () => {});
+
+      await expect(
+        setupDisposableIntegrationHarness('', mockFactory, mockMigration),
+      ).rejects.toThrow(/Test database URL is missing or empty/);
+
+      await expect(
+        setupDisposableIntegrationHarness(undefined, mockFactory, mockMigration),
+      ).rejects.toThrow(/Test database URL is missing or empty/);
+
+      await expect(
+        setupDisposableIntegrationHarness('not-a-valid-url', mockFactory, mockMigration),
+      ).rejects.toThrow(/Test database URL is malformed or invalid/);
+
+      expect(mockFactory).not.toHaveBeenCalled();
+      expect(mockMigration).not.toHaveBeenCalled();
+    });
+
+    it('4. rejects unexpected database names (zentra_dev, production, remote neon)', async () => {
+      const devUrl = 'postgresql://postgres:postgres@localhost:5432/zentra_dev';
+      await expect(
+        setupDisposableIntegrationHarness(devUrl, () => createMockConnection()),
+      ).rejects.toThrow(/Prohibited test database name \[zentra_dev\]/);
+
+      const prodUrl = 'postgresql://postgres:postgres@localhost:5432/production';
+      await expect(
+        setupDisposableIntegrationHarness(prodUrl, () => createMockConnection()),
+      ).rejects.toThrow(/Prohibited test database name \[production\]/);
+
+      const remoteUrl =
+        'postgresql://postgres:postgres@ep-remote.aws.neon.tech:5432/zentra_test_disposable';
+      await expect(
+        setupDisposableIntegrationHarness(remoteUrl, () => createMockConnection()),
+      ).rejects.toThrow(/Prohibited remote host marker/);
+    });
+
+    it('5. aborts before migrations or destructive SQL if actual connected database is zentra_test (anti-spoofing)', async () => {
+      // Attacker or misconfiguration sets URL to disposable but connection pool connects to zentra_test
+      const mockClientConnectedToCanonical = createMockConnection('zentra_test');
+      const mockMigration = vi.fn(async () => {});
+
+      await expect(
+        setupDisposableIntegrationHarness(
+          validDisposableUrl,
+          () => mockClientConnectedToCanonical,
+          mockMigration,
+        ),
+      ).rejects.toThrow(
+        /CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting protected canonical database \[zentra_test\]/,
+      );
+
+      // CRITICAL: migration runner was NEVER called
+      expect(mockMigration).not.toHaveBeenCalled();
+      expect(mockClientConnectedToCanonical.hasExecutedDestructive()).toBe(false);
+    });
+
+    it('6. aborts before migrations if actual connected database is an unexpected database (e.g. postgres)', async () => {
+      const mockClientConnectedToPostgres = createMockConnection('postgres');
+      const mockMigration = vi.fn(async () => {});
+
+      await expect(
+        setupDisposableIntegrationHarness(
+          validDisposableUrl,
+          () => mockClientConnectedToPostgres,
+          mockMigration,
+        ),
+      ).rejects.toThrow(
+        /CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting \[postgres\], expected \[zentra_test_disposable\]/,
+      );
+
+      expect(mockMigration).not.toHaveBeenCalled();
+      expect(mockClientConnectedToPostgres.hasExecutedDestructive()).toBe(false);
+    });
+
+    it('7. guard failure in connection or factory prevents migration execution', async () => {
+      const failingFactory = vi.fn(() => {
+        throw new Error('Connection refused');
+      });
+      const mockMigration = vi.fn(async () => {});
+
+      await expect(
+        setupDisposableIntegrationHarness(validDisposableUrl, failingFactory, mockMigration),
+      ).rejects.toThrow(/Connection refused/);
+
+      expect(mockMigration).not.toHaveBeenCalled();
+    });
+
+    it('8. accepts pre-established connection instance directly (options object signature)', async () => {
+      const mockClient = createMockConnection('zentra_test_disposable');
+
+      const result = await setupDisposableIntegrationHarness({
+        testDbUrl: validDisposableUrl,
+        connection: mockClient,
+      });
+
+      expect(result.dbName).toBe('zentra_test_disposable');
+      expect(result.db).toBe(mockClient);
+    });
+
+    it('9. propagates migration errors if migration runner fails', async () => {
+      const mockClient = createMockConnection('zentra_test_disposable');
+      const failingMigration = vi.fn(async () => {
+        return { error: new Error('Migration DDL syntax error') };
+      });
+
+      await expect(
+        setupDisposableIntegrationHarness(validDisposableUrl, mockClient, failingMigration),
+      ).rejects.toThrow(/Migration DDL syntax error/);
     });
   });
 });

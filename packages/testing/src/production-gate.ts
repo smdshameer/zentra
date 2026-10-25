@@ -19,7 +19,13 @@ const ALLOWED_LOCAL_HOSTS = new Set([
   '[::1]',
 ]);
 
-const ALLOWED_TEST_DATABASES = new Set(['zentra_test']);
+export const CANONICAL_TEST_DATABASE = 'zentra_test';
+export const DISPOSABLE_INTEGRATION_TEST_DATABASE = 'zentra_test_disposable';
+
+const ALLOWED_TEST_DATABASES = new Set([
+  CANONICAL_TEST_DATABASE,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+]);
 
 const PROHIBITED_REMOTE_MARKERS = [
   'neon.tech',
@@ -186,6 +192,219 @@ export function isTestDatabaseUrlSafe(dbUrl: string | undefined | null): boolean
   } catch {
     return false;
   }
+}
+
+/**
+ * Dedicated safety guard for destructive integration tests.
+ *
+ * Enforces:
+ * 1. Must satisfy all standard fail-closed test database protections (assertTestDatabaseIsSafe).
+ * 2. Explicitly REJECTS the canonical protected reconciliation database ('zentra_test').
+ * 3. Accepts ONLY the dedicated disposable test database ('zentra_test_disposable').
+ * 4. Rejects all other database names, malformed URLs, and remote targets.
+ */
+export function assertDisposableTestDatabaseUrl(dbUrl: string | undefined | null): string {
+  // First run all comprehensive test database validations (protocol, host, port, remote markers, query params)
+  assertTestDatabaseIsSafe(dbUrl);
+
+  const parsed = new URL(dbUrl!);
+  const dbName = (parsed.pathname.replace(/^\//, '').split('?')[0] ?? '').trim().toLowerCase();
+
+  if (dbName === CANONICAL_TEST_DATABASE) {
+    throw new Error(
+      `FAIL-CLOSED SAFETY GATE ABORT: Prohibited destructive test execution against protected canonical test database [${CANONICAL_TEST_DATABASE}]. Integration test suites with destructive cleanup hooks must target exclusively [${DISPOSABLE_INTEGRATION_TEST_DATABASE}].`,
+    );
+  }
+
+  if (dbName !== DISPOSABLE_INTEGRATION_TEST_DATABASE) {
+    throw new Error(
+      `FAIL-CLOSED SAFETY GATE ABORT: Prohibited database name [${dbName}] for destructive integration test path. Only dedicated disposable test database [${DISPOSABLE_INTEGRATION_TEST_DATABASE}] is permitted.`,
+    );
+  }
+
+  return dbName;
+}
+
+/**
+ * Returns true if the database URL passes all disposable test safety checks, false otherwise.
+ */
+export function isDisposableTestDatabaseUrlSafe(dbUrl: string | undefined | null): boolean {
+  try {
+    assertDisposableTestDatabaseUrl(dbUrl);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pre-destructive identity assertion.
+ *
+ * Queries or resolves SELECT current_database() on the active connection and verifies that
+ * the database is strictly 'zentra_test_disposable' before allowing any destructive SQL
+ * (such as TRUNCATE TABLE, DELETE, or destructive schema migrations).
+ *
+ * @param dbOrGetter An active database client, connection pool, Kysely-like instance, or an async getter function returning the database name.
+ */
+export async function assertConnectedToDisposableDatabase(
+  dbOrGetter:
+    | { query: (sql: string) => Promise<{ rows: Array<{ current_database?: string }> }> }
+    | { executeQuery: (compiled: any) => Promise<{ rows: Array<{ current_database?: string }> }> }
+    | (() => Promise<string | undefined | null>)
+    | any,
+): Promise<string> {
+  if (!dbOrGetter) {
+    throw new Error(
+      'FAIL-CLOSED SAFETY GATE ABORT: Database connection or getter is required for pre-destructive identity assertion.',
+    );
+  }
+
+  let currentDbName: string | undefined | null;
+
+  try {
+    if (typeof dbOrGetter === 'function') {
+      currentDbName = await dbOrGetter();
+    } else if (typeof dbOrGetter.query === 'function') {
+      const res = await dbOrGetter.query('SELECT current_database() AS current_database');
+      currentDbName = res.rows?.[0]?.current_database;
+    } else if (typeof dbOrGetter.executeQuery === 'function') {
+      const res = await dbOrGetter.executeQuery({
+        sql: 'SELECT current_database() AS current_database',
+        parameters: [],
+        query: {
+          kind: 'RawNode',
+          parameters: [],
+          sqlFragments: ['SELECT current_database() AS current_database'],
+        },
+      });
+      currentDbName = res.rows?.[0]?.current_database;
+    } else {
+      throw new Error(
+        'Unsupported database connection interface for pre-destructive identity assertion.',
+      );
+    }
+  } catch (err: any) {
+    throw new Error(
+      `FAIL-CLOSED SAFETY GATE ABORT: Failed to verify active database identity before destructive operation: ${err.message}`,
+    );
+  }
+
+  const normalized = (currentDbName ?? '').trim().toLowerCase();
+
+  if (!normalized) {
+    throw new Error(
+      'FAIL-CLOSED SAFETY GATE ABORT: Current database name could not be determined. Aborting destructive operation.',
+    );
+  }
+
+  if (normalized === CANONICAL_TEST_DATABASE) {
+    throw new Error(
+      `CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting protected canonical database [${CANONICAL_TEST_DATABASE}]! Destructive operations (TRUNCATE/DROP/DELETE) are strictly prohibited against this database.`,
+    );
+  }
+
+  if (normalized !== DISPOSABLE_INTEGRATION_TEST_DATABASE) {
+    throw new Error(
+      `CRITICAL FAIL-CLOSED SAFETY ABORT: Active database connection is targeting [${normalized}], expected [${DISPOSABLE_INTEGRATION_TEST_DATABASE}]! Refusing to execute destructive test operations.`,
+    );
+  }
+
+  return normalized;
+}
+
+export interface DisposableIntegrationHarnessConfig<T = any> {
+  testDbUrl: string | undefined | null;
+  /**
+   * Connection factory function (e.g. createDatabaseConnection) OR an established database connection.
+   */
+  connection: ((url: string) => T | Promise<T>) | T;
+  /**
+   * Optional migration runner (e.g. runMigrationsToLatest).
+   * GUARANTEE: Will ONLY execute after testDbUrl passes validation AND live connection identity is proven to be 'zentra_test_disposable'.
+   */
+  runMigrations?: (url: string) => Promise<{ error?: any } | void | any>;
+}
+
+export interface DisposableIntegrationHarnessResult<T = any> {
+  db: T;
+  dbName: string;
+}
+
+/**
+ * Initializes and verifies a dedicated disposable integration test database harness.
+ *
+ * Enforces an architectural circuit-breaker before any migration, TRUNCATE, table deletion,
+ * or fixture seeding can execute:
+ * 1. Confirms test environment flags via assertTestEnvironmentIsSafe().
+ * 2. Validates testDbUrl via assertDisposableTestDatabaseUrl(): rejects zentra_test, remote markers,
+ *    malformed URLs, and non-disposable database names.
+ * 3. Establishes or resolves the database connection.
+ * 4. Queries SELECT current_database() on the live connection via assertConnectedToDisposableDatabase():
+ *    fails closed with CRITICAL FAIL-CLOSED SAFETY ABORT if the connected database is zentra_test or anything
+ *    other than zentra_test_disposable.
+ * 5. Executes runMigrations only AFTER step 4 passes. If migrations fail, propagates the error.
+ * 6. Returns the verified database instance and database name.
+ */
+export async function setupDisposableIntegrationHarness<T = any>(
+  configOrUrl: DisposableIntegrationHarnessConfig<T> | string | undefined | null,
+  connectionFactory?: ((url: string) => T | Promise<T>) | T,
+  runMigrations?: (url: string) => Promise<{ error?: any } | void | any>,
+): Promise<DisposableIntegrationHarnessResult<T>> {
+  let testDbUrl: string | undefined | null;
+  let connection: ((url: string) => T | Promise<T>) | T | undefined;
+  let migrationsRunner: ((url: string) => Promise<{ error?: any } | void | any>) | undefined;
+
+  if (typeof configOrUrl === 'object' && configOrUrl !== null && 'connection' in configOrUrl) {
+    testDbUrl = configOrUrl.testDbUrl;
+    connection = configOrUrl.connection;
+    migrationsRunner = configOrUrl.runMigrations;
+  } else {
+    testDbUrl = configOrUrl as string | undefined | null;
+    connection = connectionFactory;
+    migrationsRunner = runMigrations;
+  }
+
+  // 1. Verify environment safety
+  assertTestEnvironmentIsSafe();
+
+  // 2. Validate URL strictly targets zentra_test_disposable
+  const dbName = assertDisposableTestDatabaseUrl(testDbUrl);
+
+  // 3. Resolve connection
+  if (!connection) {
+    throw new Error(
+      'FAIL-CLOSED SAFETY GATE ABORT: A valid database connection or connection factory is required for disposable test harness initialization.',
+    );
+  }
+
+  let db: T;
+  if (typeof connection === 'function') {
+    db = await (connection as (url: string) => T | Promise<T>)(testDbUrl!);
+  } else {
+    db = connection;
+  }
+
+  // 4. PRE-DESTRUCTIVE IDENTITY ASSERTION:
+  // Live query on the active connection verifying current_database() === 'zentra_test_disposable'
+  await assertConnectedToDisposableDatabase(db);
+
+  // 5. Execute migrations ONLY after live connection identity is proven
+  if (migrationsRunner) {
+    const migrationResult = await migrationsRunner(testDbUrl!);
+    if (
+      migrationResult &&
+      typeof migrationResult === 'object' &&
+      'error' in migrationResult &&
+      migrationResult.error
+    ) {
+      throw migrationResult.error;
+    }
+  }
+
+  return {
+    db,
+    dbName,
+  };
 }
 
 /**
