@@ -7,7 +7,6 @@ import { Kysely, PostgresDialect } from 'kysely';
 import { Pool } from 'pg';
 import type { DatabaseSchema } from './database.types';
 import { loadAppConfig } from '@zentra/config';
-import { assertTestDatabaseIsSafe } from '@zentra/testing';
 
 export const DATABASE_CONNECTION = 'DATABASE_CONNECTION';
 
@@ -16,13 +15,23 @@ export function createDatabaseConnection(customUrl?: string): Kysely<DatabaseSch
   const connectionString = customUrl || config.DATABASE_URL;
 
   // FAIL-CLOSED TEST GATE: If running in test mode, ensure the target database
-  // is strictly validated as an isolated local test database before opening connection
+  // is strictly validated as an isolated local test database before opening connection.
+  // Dynamic require ensures @zentra/testing is never required during production runtime.
   if (
     process.env.NODE_ENV === 'test' ||
     config.APP_ENV === 'test' ||
     process.env.APP_ENV === 'test'
   ) {
-    assertTestDatabaseIsSafe(connectionString);
+    // Dynamic require ensures @zentra/testing is never required during production runtime.
+    // Try compiled dist/production-gate.js first to bypass extensionless ESM re-export resolution, falling back to package index.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    let gate: typeof import('@zentra/testing');
+    try {
+      gate = require('@zentra/testing/dist/production-gate.js');
+    } catch {
+      gate = require('@zentra/testing');
+    }
+    gate.assertTestDatabaseIsSafe(connectionString);
   }
 
   const pool = new Pool({

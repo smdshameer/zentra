@@ -16,7 +16,6 @@ import {
   type MigrationResultSet,
 } from 'kysely';
 import { createDatabaseConnection } from './database.connection';
-import { assertTestDatabaseIsSafe } from '@zentra/testing';
 import { loadAppConfig } from '@zentra/config';
 
 import * as m1 from './migrations/20261005000001_create_territory_and_schools';
@@ -78,7 +77,14 @@ export function createFileMigrator(db = createDatabaseConnection()): Migrator {
 export async function runMigrationsToLatest(databaseUrl?: string): Promise<MigrationResultSet> {
   if (process.env.NODE_ENV === 'test' || process.env.APP_ENV === 'test') {
     const target = databaseUrl || loadAppConfig().DATABASE_URL;
-    assertTestDatabaseIsSafe(target);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    let gate: typeof import('@zentra/testing');
+    try {
+      gate = require('@zentra/testing/dist/production-gate.js');
+    } catch {
+      gate = require('@zentra/testing');
+    }
+    gate.assertTestDatabaseIsSafe(target);
   }
   const db = createDatabaseConnection(databaseUrl);
   const migrator = createMigrator(db);
@@ -94,7 +100,14 @@ export async function runMigrationsToLatest(databaseUrl?: string): Promise<Migra
 export async function rollbackLatestMigration(databaseUrl?: string): Promise<MigrationResultSet> {
   if (process.env.NODE_ENV === 'test' || process.env.APP_ENV === 'test') {
     const target = databaseUrl || loadAppConfig().DATABASE_URL;
-    assertTestDatabaseIsSafe(target);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    let gate: typeof import('@zentra/testing');
+    try {
+      gate = require('@zentra/testing/dist/production-gate.js');
+    } catch {
+      gate = require('@zentra/testing');
+    }
+    gate.assertTestDatabaseIsSafe(target);
   }
   const db = createDatabaseConnection(databaseUrl);
   const migrator = createMigrator(db);
