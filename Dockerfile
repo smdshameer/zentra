@@ -41,6 +41,7 @@ RUN pnpm install --frozen-lockfile
 
 # Layer 2: Copy pruned application and package source code
 COPY --from=pruner /app/out/full/ .
+COPY --from=pruner /app/tsconfig.base.json ./tsconfig.base.json
 
 # Compile @zentra/api and all upstream workspace dependencies
 RUN pnpm --filter=@zentra/api... build
