@@ -43,10 +43,15 @@ import { ObjectStorageService } from '../src/modules/evidence/services/object-st
 import { generateUuidV7 } from '@zentra/shared';
 import * as crypto from 'crypto';
 import { runMigrationsToLatest } from '../src/database/migration-runner';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import { createDatabaseConnection } from '../src/database/database.connection';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 16 — End-to-End Field Rehearsal Specification', () => {
   let app: NestFastifyApplication;
@@ -80,14 +85,13 @@ describe('ZENTRA Phase 16 — End-to-End Field Rehearsal Specification', () => {
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
 
-    // Run migrations to ensure latest schema
-    await runMigrationsToLatest(TEST_DB_URL);
-
-    const { createDatabaseConnection } = await import('../src/database/database.connection');
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -134,8 +138,17 @@ describe('ZENTRA Phase 16 — End-to-End Field Rehearsal Specification', () => {
         schools,
         blocks,
         districts,
-        audit_events
+        audit_events,
+        sync_change_ledger
       CASCADE;
+    `.execute(db);
+
+    await sql`
+      INSERT INTO sync_sequence_tracker (tracker_id, current_seq) VALUES (1, 0)
+      ON CONFLICT (tracker_id) DO UPDATE SET current_seq = 0;
+      INSERT INTO sync_retention_watermark (watermark_id, min_available_seq, purged_through_seq)
+      VALUES (1, 1, 0)
+      ON CONFLICT (watermark_id) DO UPDATE SET min_available_seq = 1, purged_through_seq = 0;
     `.execute(db);
 
     // Seed synthetic fixtures
@@ -202,6 +215,7 @@ describe('ZENTRA Phase 16 — End-to-End Field Rehearsal Specification', () => {
 
   afterAll(async () => {
     if (app) await app.close();
+    if (db) await db.destroy();
   });
 
   // =========================================================================

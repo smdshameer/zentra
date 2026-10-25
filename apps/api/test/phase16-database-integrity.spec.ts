@@ -22,10 +22,14 @@ import { runMigrationsToLatest, rollbackLatestMigration } from '../src/database/
 import { seedSyntheticDevelopmentFixtures, type SeededEntities } from '../src/database/seeds/synthetic-dev-fixtures';
 import { generateUuidV7 } from '@zentra/shared';
 import * as childProcess from 'child_process';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 16: Database Integrity, Lineage & Migration Reversibility Suite', () => {
   let db: Kysely<DatabaseSchema>;
@@ -36,11 +40,13 @@ describe('ZENTRA Phase 16: Database Integrity, Lineage & Migration Reversibility
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
 
-    await runMigrationsToLatest(TEST_DB_URL);
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     // Clean tables
     await sql`
@@ -74,8 +80,17 @@ describe('ZENTRA Phase 16: Database Integrity, Lineage & Migration Reversibility
         schools,
         blocks,
         districts,
-        audit_events
+        audit_events,
+        sync_change_ledger
       CASCADE;
+    `.execute(db);
+
+    await sql`
+      INSERT INTO sync_sequence_tracker (tracker_id, current_seq) VALUES (1, 0)
+      ON CONFLICT (tracker_id) DO UPDATE SET current_seq = 0;
+      INSERT INTO sync_retention_watermark (watermark_id, min_available_seq, purged_through_seq)
+      VALUES (1, 1, 0)
+      ON CONFLICT (watermark_id) DO UPDATE SET min_available_seq = 1, purged_through_seq = 0;
     `.execute(db);
 
     seeded = await seedSyntheticDevelopmentFixtures(db);

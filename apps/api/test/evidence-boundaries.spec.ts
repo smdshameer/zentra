@@ -16,10 +16,15 @@ import { AppModule } from '../src/app.module';
 import { TokenService } from '../src/modules/auth/token.service';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { generateUuidV7 } from '@zentra/shared';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  assertTestEnvironmentIsSafe,
+  assertDisposableTestDatabaseUrl,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 14 — Strict Architectural Boundary Verification', () => {
   let app: NestFastifyApplication;
@@ -33,7 +38,7 @@ describe('ZENTRA Phase 14 — Strict Architectural Boundary Verification', () =>
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
     assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
+    assertDisposableTestDatabaseUrl(TEST_DB_URL);
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],

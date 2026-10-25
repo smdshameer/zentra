@@ -28,12 +28,16 @@ import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter
 import { SyncDeltaService } from '../src/modules/sync/services/sync-delta.service';
 import { encodeSyncCursor, decodeSyncCursor } from '../src/modules/sync/utils/sync-cursor';
 import { generateUuidV7 } from '@zentra/shared';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 import { runMigrationsToLatest } from '../src/database/migration-runner';
 import { HttpException, HttpStatus } from '@nestjs/common';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('Stage 6G Workstream A: Change Ledger Foundation Suite', () => {
   let app: NestFastifyApplication;
@@ -61,10 +65,13 @@ describe('Stage 6G Workstream A: Change Ledger Foundation Suite', () => {
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
-
-    await runMigrationsToLatest(TEST_DB_URL);
+    const { createDatabaseConnection } = await import('../src/database/database.connection');
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -75,12 +82,13 @@ describe('Stage 6G Workstream A: Change Ledger Foundation Suite', () => {
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
 
-    db = moduleFixture.get<Kysely<DatabaseSchema>>(DATABASE_CONNECTION);
     deltaService = moduleFixture.get<SyncDeltaService>(SyncDeltaService);
 
     // Clean tables using TRUNCATE CASCADE before seeding
     await sql`
       TRUNCATE TABLE
+        idempotency_keys,
+        tombstones,
         import_staging_records,
         import_jobs,
         conveyance_claims,
@@ -126,6 +134,9 @@ describe('Stage 6G Workstream A: Change Ledger Foundation Suite', () => {
   afterAll(async () => {
     if (app) {
       await app.close();
+    }
+    if (db) {
+      await db.destroy();
     }
   });
 

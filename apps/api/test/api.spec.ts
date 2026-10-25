@@ -3,15 +3,24 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { AppModule } from '../src/app.module';
 import { HealthController } from '../src/modules/health/health.controller';
-import { assertTestEnvironmentIsSafe } from '@zentra/testing';
+import {
+  assertTestEnvironmentIsSafe,
+  assertDisposableTestDatabaseUrl,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
+
+const TEST_DB_URL =
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA API Foundation Smoke Tests', () => {
   beforeAll(() => {
     process.env.NODE_ENV = 'test';
     process.env.APP_ENV = 'test';
-    process.env.DATABASE_URL =
-      process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+    process.env.TEST_DATABASE_URL = TEST_DB_URL;
+    process.env.DATABASE_URL = TEST_DB_URL;
     assertTestEnvironmentIsSafe();
+    assertDisposableTestDatabaseUrl(TEST_DB_URL);
   });
   it('successfully compiles AppModule in NestJS DI container', async () => {
     const moduleRef: TestingModule = await Test.createTestingModule({

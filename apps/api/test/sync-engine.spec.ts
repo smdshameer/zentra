@@ -28,10 +28,14 @@ import { TokenService } from '../src/modules/auth/token.service';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { generateUuidV7 } from '@zentra/shared';
 import { runMigrationsToLatest } from '../src/database/migration-runner';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 12 — Delta Synchronization & Conflict Arbitration Subsystem', () => {
   let app: NestFastifyApplication;
@@ -52,14 +56,14 @@ describe('ZENTRA Phase 12 — Delta Synchronization & Conflict Arbitration Subsy
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
-
-    // Run migrations including Phase 12 idempotency_keys
-    await runMigrationsToLatest(TEST_DB_URL);
 
     const { createDatabaseConnection } = await import('../src/database/database.connection');
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     // Clean tables for reproducible test runs
     await sql`
@@ -91,8 +95,17 @@ describe('ZENTRA Phase 12 — Delta Synchronization & Conflict Arbitration Subsy
         schools,
         blocks,
         districts,
-        audit_events
+        audit_events,
+        sync_change_ledger
       CASCADE;
+    `.execute(db);
+
+    await sql`
+      INSERT INTO sync_sequence_tracker (tracker_id, current_seq) VALUES (1, 0)
+      ON CONFLICT (tracker_id) DO UPDATE SET current_seq = 0;
+      INSERT INTO sync_retention_watermark (watermark_id, min_available_seq, purged_through_seq)
+      VALUES (1, 1, 0)
+      ON CONFLICT (watermark_id) DO UPDATE SET min_available_seq = 1, purged_through_seq = 0;
     `.execute(db);
 
     // Seed synthetic fixtures
@@ -612,6 +625,29 @@ describe('ZENTRA Phase 12 — Delta Synchronization & Conflict Arbitration Subsy
           deleted_at: new Date(),
           deleted_by_user_id: seeded.adminUserId,
           tombstone_reason: 'Mistakenly registered call permanently purged',
+        })
+        .execute();
+
+      // Record tombstone in sync_change_ledger for Stage 6G change ledger delta query
+      const nextSeqResult = await sql<{ current_seq: string | number }>`
+        UPDATE sync_sequence_tracker
+        SET current_seq = current_seq + 1
+        WHERE tracker_id = 1
+        RETURNING current_seq;
+      `.execute(db);
+      const nextSeq = Number(nextSeqResult.rows[0]?.current_seq ?? 1);
+
+      await db
+        .insertInto('sync_change_ledger')
+        .values({
+          event_seq: nextSeq,
+          entity_type: 'service_cases',
+          entity_id: tombstonedCaseId,
+          action: 'TOMBSTONE',
+          version: 1,
+          district_id: seeded.districtId,
+          data: { entityId: tombstonedCaseId, deletedAt: new Date().toISOString() },
+          committed_at: new Date(),
         })
         .execute();
 

@@ -24,10 +24,14 @@ import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter
 import { generateUuidV7 } from '@zentra/shared';
 import { runMigrationsToLatest } from '../src/database/migration-runner';
 import { ConveyancePolicyService } from '../src/modules/conveyance/services/conveyance-policy.service';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 function getErrorMessage(body: any): string {
   const details = body.error?.details?.map((d: any) => d.message).join(' ') || '';
@@ -56,14 +60,14 @@ describe('ZENTRA Phase 15 — Conveyance Claims & Management Portal Domain Suite
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
-
-    // Run migrations to ensure latest schema
-    await runMigrationsToLatest(TEST_DB_URL);
 
     const { createDatabaseConnection } = await import('../src/database/database.connection');
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     // Clean tables for reproducible test runs
     await sql`

@@ -23,10 +23,15 @@ import {
 import { TokenService } from '../src/modules/auth/token.service';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { generateUuidV7 } from '@zentra/shared';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import { runMigrationsToLatest } from '../src/database/migration-runner';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 13 — Strict Architectural Boundary Verification', () => {
   let app: NestFastifyApplication;
@@ -41,11 +46,14 @@ describe('ZENTRA Phase 13 — Strict Architectural Boundary Verification', () =>
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
 
     const { createDatabaseConnection } = await import('../src/database/database.connection');
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],

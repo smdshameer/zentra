@@ -33,10 +33,15 @@ import { ObjectStorageService } from '../src/modules/evidence/services/object-st
 import { ConflictArbitratorService } from '../src/modules/sync/services/conflict-arbitrator.service';
 import { generateUuidV7 } from '@zentra/shared';
 import * as crypto from 'crypto';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
+import { createDatabaseConnection } from '../src/database/database.connection';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 14 — Evidence Pipeline & Direct S3 Streaming', () => {
   let app: NestFastifyApplication;
@@ -61,14 +66,12 @@ describe('ZENTRA Phase 14 — Evidence Pipeline & Direct S3 Streaming', () => {
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
-
-    // Run migrations to latest including m13 (evidence_files)
-    await runMigrationsToLatest(TEST_DB_URL);
-
-    const { createDatabaseConnection } = await import('../src/database/database.connection');
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     // Clean tables for reproducible test runs
     await sql`
@@ -101,8 +104,17 @@ describe('ZENTRA Phase 14 — Evidence Pipeline & Direct S3 Streaming', () => {
         schools,
         blocks,
         districts,
-        audit_events
+        audit_events,
+        sync_change_ledger
       CASCADE;
+    `.execute(db);
+
+    await sql`
+      INSERT INTO sync_sequence_tracker (tracker_id, current_seq) VALUES (1, 0)
+      ON CONFLICT (tracker_id) DO UPDATE SET current_seq = 0;
+      INSERT INTO sync_retention_watermark (watermark_id, min_available_seq, purged_through_seq)
+      VALUES (1, 1, 0)
+      ON CONFLICT (watermark_id) DO UPDATE SET min_available_seq = 1, purged_through_seq = 0;
     `.execute(db);
 
     // Seed synthetic fixtures
@@ -1303,5 +1315,62 @@ describe('ZENTRA Phase 14 — Evidence Pipeline & Direct S3 Streaming', () => {
       expect(body.data.evidenceId).toBeDefined();
       expect(typeof body.data.evidenceId).toBe('string');
     });
+  });
+});
+
+describe('Process-Scoped In-Memory Storage Lifecycle & Isolation (Gate 6B-7M)', () => {
+  const testKey =
+    'evidence/test/01a126f6-7d9a-7dfa-96bb-d6f4a07fe540/01a13ac8-6cdc-778c-8593-ee170fc4d885/slot1-test.jpg';
+  const testPayload = Buffer.from('zentra-process-scoped-storage-verification-payload-gate6b7m');
+  const expectedLength = testPayload.length;
+  const expectedSha256 = crypto.createHash('sha256').update(testPayload).digest('hex');
+
+  it('verifies that an object written to an in-memory ObjectStorageService instance can be retrieved and integrity-verified on that SAME instance', async () => {
+    const storageServiceInstance1 = new ObjectStorageService();
+
+    // 1. Put object into instance 1
+    const putResult = await storageServiceInstance1.putObject(testKey, testPayload, 'image/jpeg');
+    expect(putResult.objectKey).toBe(testKey);
+    expect(putResult.contentLength).toBe(expectedLength);
+    expect(putResult.checksumSha256).toBe(expectedSha256);
+
+    // 2. Retrieve metadata via headObject on instance 1
+    const headResult = await storageServiceInstance1.headObject(testKey);
+    expect(headResult).not.toBeNull();
+    expect(headResult?.contentLength).toBe(expectedLength);
+    expect(headResult?.checksumSha256).toBe(expectedSha256);
+    expect(headResult?.contentType).toBe('image/jpeg');
+
+    // 3. Verify cryptographic integrity on instance 1
+    const integrityResult = await storageServiceInstance1.verifyObjectIntegrity(
+      testKey,
+      expectedSha256,
+      expectedLength,
+    );
+    expect(integrityResult.valid).toBe(true);
+    expect(integrityResult.actualChecksum).toBe(expectedSha256);
+    expect(integrityResult.actualSizeBytes).toBe(expectedLength);
+    expect(integrityResult.error).toBeUndefined();
+  });
+
+  it('verifies that a newly constructed independent ObjectStorageService instance does NOT inherit in-memory objects from prior instances (isolated process/instance lifecycle)', async () => {
+    const storageServiceInstance2 = new ObjectStorageService();
+
+    // 1. Check headObject on instance 2 -> must return null (key does not exist in instance 2)
+    const headResult = await storageServiceInstance2.headObject(testKey);
+    expect(headResult).toBeNull();
+
+    // 2. Verify integrity on instance 2 -> must report OBJECT_NOT_FOUND (fail-closed, valid === false)
+    const integrityResult = await storageServiceInstance2.verifyObjectIntegrity(
+      testKey,
+      expectedSha256,
+      expectedLength,
+    );
+    expect(integrityResult.valid).toBe(false);
+    expect(integrityResult.actualChecksum).toBe('');
+    expect(integrityResult.actualSizeBytes).toBe(0);
+    expect(integrityResult.error).toBeDefined();
+    expect(integrityResult.error).toContain('OBJECT_NOT_FOUND');
+    expect(integrityResult.error).toContain(testKey);
   });
 });

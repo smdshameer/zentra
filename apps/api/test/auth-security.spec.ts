@@ -29,12 +29,16 @@ import {
 import { PasswordService } from '../src/modules/auth/password.service';
 import { TokenService } from '../src/modules/auth/token.service';
 import { RlsService } from '../src/modules/auth/rls.service';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 import type { LoginResponse, RefreshTokenResponse, UserProfileDto } from '@zentra/contracts';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Phase 5: Authentication, RBAC & RLS Security Suite', () => {
   let app: NestFastifyApplication;
@@ -49,16 +53,13 @@ describe('ZENTRA Phase 5: Authentication, RBAC & RLS Security Suite', () => {
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     process.env.DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
 
-    // Run migrations to latest
-    const migrationResult = await runMigrationsToLatest(TEST_DB_URL);
-    if (migrationResult.error) {
-      throw migrationResult.error;
-    }
-
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
 
     // Clean up test tables in foreign-key dependency order
     await db.deleteFrom('conveyance_claims').execute();

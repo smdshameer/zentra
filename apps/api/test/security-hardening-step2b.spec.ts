@@ -16,10 +16,15 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/main';
 import { HealthService } from '../src/modules/health/health.service';
 import { ObjectStorageService } from '../src/modules/evidence/services/object-storage.service';
-import { assertTestEnvironmentIsSafe } from '@zentra/testing';
+import {
+  assertTestEnvironmentIsSafe,
+  assertDisposableTestDatabaseUrl,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA Step 2B: Application Security Hardening Verification Suite', () => {
   const originalEnv = { ...process.env };
@@ -30,6 +35,7 @@ describe('ZENTRA Step 2B: Application Security Hardening Verification Suite', ()
     process.env.DATABASE_URL = TEST_DB_URL;
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
     assertTestEnvironmentIsSafe();
+    assertDisposableTestDatabaseUrl(TEST_DB_URL);
   });
 
   afterEach(() => {

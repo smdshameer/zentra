@@ -19,11 +19,15 @@ import { Kysely } from 'kysely';
 import type { DatabaseSchema } from '../src/database/database.types';
 import { createDatabaseConnection } from '../src/database/database.connection';
 import { runMigrationsToLatest, rollbackLatestMigration } from '../src/database/migration-runner';
-import { assertTestEnvironmentIsSafe, assertTestDatabaseIsSafe } from '@zentra/testing';
+import {
+  setupDisposableIntegrationHarness,
+  DISPOSABLE_INTEGRATION_TEST_DATABASE,
+} from '@zentra/testing';
 import { generateUuidV7 } from '@zentra/shared';
 
 const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/zentra_test';
+  process.env.TEST_DATABASE_URL ||
+  `postgresql://postgres:postgres@localhost:5432/${DISPOSABLE_INTEGRATION_TEST_DATABASE}`;
 
 describe('ZENTRA PostgreSQL Database & Domain Foundation Tests', () => {
   let db: Kysely<DatabaseSchema>;
@@ -32,16 +36,14 @@ describe('ZENTRA PostgreSQL Database & Domain Foundation Tests', () => {
     process.env.NODE_ENV = 'test';
     process.env.APP_ENV = 'test';
     process.env.TEST_DATABASE_URL = TEST_DB_URL;
-    assertTestEnvironmentIsSafe();
-    assertTestDatabaseIsSafe(TEST_DB_URL);
+    process.env.DATABASE_URL = TEST_DB_URL;
 
-    // Ensure migrations are run to latest
-    const migrationResult = await runMigrationsToLatest(TEST_DB_URL);
-    if (migrationResult.error) {
-      throw migrationResult.error;
-    }
-
-    db = createDatabaseConnection(TEST_DB_URL);
+    const harness = await setupDisposableIntegrationHarness(
+      TEST_DB_URL,
+      createDatabaseConnection,
+      runMigrationsToLatest,
+    );
+    db = harness.db;
   });
 
   afterAll(async () => {
