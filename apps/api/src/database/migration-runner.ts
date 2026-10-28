@@ -119,3 +119,34 @@ export async function rollbackLatestMigration(databaseUrl?: string): Promise<Mig
     await db.destroy();
   }
 }
+
+export interface MigrationStatusInfo {
+  name: string;
+  isExecuted: boolean;
+  executedAt?: Date;
+}
+
+export async function getMigrationStatus(databaseUrl?: string): Promise<{
+  appliedCount: number;
+  pendingCount: number;
+  migrations: MigrationStatusInfo[];
+}> {
+  const db = createDatabaseConnection(databaseUrl);
+  const migrator = createMigrator(db);
+  try {
+    const list = await migrator.getMigrations();
+    const executed = list.filter((m) => Boolean(m.executedAt));
+    const pending = list.filter((m) => !m.executedAt);
+    return {
+      appliedCount: executed.length,
+      pendingCount: pending.length,
+      migrations: list.map((m) => ({
+        name: m.name,
+        isExecuted: Boolean(m.executedAt),
+        executedAt: m.executedAt,
+      })),
+    };
+  } finally {
+    await db.destroy();
+  }
+}

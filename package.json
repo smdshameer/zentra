@@ -18,7 +18,10 @@
     "dev:field": "turbo run dev --filter=@zentra/field",
     "test:contracts": "turbo run test --filter=@zentra/contracts",
     "test:api": "turbo run test --filter=@zentra/api",
-    "test:web": "turbo run test --filter=@zentra/web"
+    "test:web": "turbo run test --filter=@zentra/web",
+    "db:migrate": "pnpm --filter=@zentra/api db:migrate",
+    "db:rollback": "pnpm --filter=@zentra/api db:rollback",
+    "db:status": "pnpm --filter=@zentra/api db:status"
   },
   "devDependencies": {
     "@types/node": "^22.5.4",

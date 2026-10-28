@@ -9,7 +9,10 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --fileParallelism=false",
-    "clean": "rimraf dist *.tsbuildinfo"
+    "clean": "rimraf dist *.tsbuildinfo",
+    "db:migrate": "tsx src/database/cli.ts migrate",
+    "db:rollback": "tsx src/database/cli.ts rollback",
+    "db:status": "tsx src/database/cli.ts status"
   },
   "dependencies": {
     "@fastify/helmet": "^13.1.1",
