@@ -15,6 +15,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import type { Readable } from 'stream';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  type S3ClientConfig,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   DEFAULT_PRESIGNED_EXPIRATION_SECONDS,
   DEFAULT_MAX_EVIDENCE_FILE_SIZE_BYTES,
@@ -77,8 +86,10 @@ export class ObjectStorageService {
   private readonly endpoint?: string;
   private readonly accessKeyId?: string;
   private readonly secretAccessKey?: string;
+  private readonly forcePathStyle: boolean;
   private readonly hasIamRoleCredentials: boolean;
   private readonly isTestEnvironment: boolean;
+  private readonly s3Client?: S3Client;
   private readonly logger = new Logger(ObjectStorageService.name);
 
   /**
@@ -124,6 +135,7 @@ export class ObjectStorageService {
     this.endpoint = process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT;
     this.accessKeyId = process.env.S3_ACCESS_KEY || process.env.AWS_ACCESS_KEY_ID;
     this.secretAccessKey = process.env.S3_SECRET_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+    this.forcePathStyle = process.env.S3_FORCE_PATH_STYLE === 'true';
 
     // Detect AWS IAM Task Role / Container Credentials (e.g. ECS Fargate)
     this.hasIamRoleCredentials = Boolean(
@@ -133,6 +145,10 @@ export class ObjectStorageService {
     );
 
     const isStagingOrProd = this.appEnv === 'staging' || this.appEnv === 'production';
+
+    const hasValidCredentials =
+      (Boolean(this.accessKeyId) && Boolean(this.secretAccessKey)) ||
+      this.hasIamRoleCredentials;
 
     if (isStagingOrProd) {
       // 1. FAIL-CLOSED GATE FOR STAGING & PRODUCTION:
@@ -151,10 +167,6 @@ export class ObjectStorageService {
       }
 
       // Mandatory credentials check: must have real static keys or IAM task role
-      const hasValidCredentials =
-        (Boolean(this.accessKeyId) && Boolean(this.secretAccessKey)) ||
-        this.hasIamRoleCredentials;
-
       if (!hasValidCredentials) {
         throw new Error(
           `S3_FAIL_CLOSED_ERROR: Mandatory S3 credentials missing for environment "${this.appEnv}". ` +
@@ -175,6 +187,26 @@ export class ObjectStorageService {
     } else {
       // Local development
       this.testStorage = new Map();
+    }
+
+    if (hasValidCredentials) {
+      const clientConfig: S3ClientConfig = {
+        region: this.region,
+        forcePathStyle: this.forcePathStyle,
+      };
+
+      if (this.endpoint) {
+        clientConfig.endpoint = this.endpoint;
+      }
+
+      if (this.accessKeyId && this.secretAccessKey) {
+        clientConfig.credentials = {
+          accessKeyId: this.accessKeyId,
+          secretAccessKey: this.secretAccessKey,
+        };
+      }
+
+      this.s3Client = new S3Client(clientConfig);
     }
   }
 
@@ -245,66 +277,33 @@ export class ObjectStorageService {
     let presignedUrl: string;
 
     if (this.appEnv === 'staging' || this.appEnv === 'production') {
-      if (!this.accessKeyId || !this.secretAccessKey) {
-        if (!this.hasIamRoleCredentials) {
-          throw new Error(
-            `S3_FAIL_CLOSED_ERROR: Real S3 signing credentials unavailable in ${this.appEnv}. Mock signing prohibited.`,
-          );
-        }
+      if (!this.s3Client) {
+        throw new Error(
+          `S3_FAIL_CLOSED_ERROR: Real S3 signing credentials unavailable in ${this.appEnv}. Mock signing prohibited.`,
+        );
       }
 
-      // Real AWS SigV4 query authentication URL
-      const now = new Date();
-      const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-      const dateStamp = amzDate.substring(0, 8);
-      const credential = `${this.accessKeyId || 'ASIA_IAM_ROLE'}/${dateStamp}/${this.region}/s3/aws4_request`;
+      const command = new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+        ContentType: params.mimeType,
+      });
 
-      const stringToSign =
-        `AWS4-HMAC-SHA256\n${amzDate}\n${dateStamp}/${this.region}/s3/aws4_request\n` +
-        crypto.createHash('sha256').update(`PUT\n/${objectKey}\n\n`).digest('hex');
-
-      const kDate = crypto
-        .createHmac('sha256', `AWS4${this.secretAccessKey || 'IAM_SESSION_KEY'}`)
-        .update(dateStamp)
-        .digest();
-      const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
-      const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
-      const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-      const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-      const host = this.endpoint
-        ? new URL(this.endpoint).host
-        : `${this.bucketName}.s3.${this.region}.amazonaws.com`;
-      presignedUrl = `https://${host}/${objectKey}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=${encodeURIComponent(
-        credential,
-      )}&X-Amz-Date=${amzDate}&X-Amz-Expires=${expiresInSeconds}&X-Amz-SignedHeaders=host&X-Amz-Signature=${signature}`;
+      presignedUrl = await getSignedUrl(this.s3Client, command, {
+        expiresIn: expiresInSeconds,
+      });
     } else {
       // In test/development mode:
-      if (this.accessKeyId && this.secretAccessKey) {
-        const now = new Date();
-        const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-        const dateStamp = amzDate.substring(0, 8);
-        const credential = `${this.accessKeyId}/${dateStamp}/${this.region}/s3/aws4_request`;
+      if (this.s3Client) {
+        const command = new PutObjectCommand({
+          Bucket: this.bucketName,
+          Key: objectKey,
+          ContentType: params.mimeType,
+        });
 
-        const stringToSign =
-          `AWS4-HMAC-SHA256\n${amzDate}\n${dateStamp}/${this.region}/s3/aws4_request\n` +
-          crypto.createHash('sha256').update(`PUT\n/${objectKey}\n\n`).digest('hex');
-
-        const kDate = crypto
-          .createHmac('sha256', `AWS4${this.secretAccessKey}`)
-          .update(dateStamp)
-          .digest();
-        const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
-        const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
-        const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-        const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-        const host = this.endpoint
-          ? new URL(this.endpoint).host
-          : `${this.bucketName}.s3.${this.region}.amazonaws.com`;
-        presignedUrl = `https://${host}/${objectKey}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=${encodeURIComponent(
-          credential,
-        )}&X-Amz-Date=${amzDate}&X-Amz-Expires=${expiresInSeconds}&X-Amz-SignedHeaders=host&X-Amz-Signature=${signature}`;
+        presignedUrl = await getSignedUrl(this.s3Client, command, {
+          expiresIn: expiresInSeconds,
+        });
       } else {
         // In-memory / Test Mode Mock Signed URL
         const signature = crypto
@@ -340,65 +339,30 @@ export class ObjectStorageService {
     let downloadUrl: string;
 
     if (this.appEnv === 'staging' || this.appEnv === 'production') {
-      if (!this.accessKeyId || !this.secretAccessKey) {
-        if (!this.hasIamRoleCredentials) {
-          throw new Error(
-            `S3_FAIL_CLOSED_ERROR: Real S3 signing credentials unavailable in ${this.appEnv}. Mock signing prohibited.`,
-          );
-        }
+      if (!this.s3Client) {
+        throw new Error(
+          `S3_FAIL_CLOSED_ERROR: Real S3 signing credentials unavailable in ${this.appEnv}. Mock signing prohibited.`,
+        );
       }
 
-      // Real SigV4 download URL
-      const now = new Date();
-      const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-      const dateStamp = amzDate.substring(0, 8);
-      const credential = `${this.accessKeyId || 'ASIA_IAM_ROLE'}/${dateStamp}/${this.region}/s3/aws4_request`;
+      const command = new GetObjectCommand({
+        Bucket: this.bucketName,
+        Key: params.objectKey,
+      });
 
-      const stringToSign =
-        `AWS4-HMAC-SHA256\n${amzDate}\n${dateStamp}/${this.region}/s3/aws4_request\n` +
-        crypto.createHash('sha256').update(`GET\n/${params.objectKey}\n\n`).digest('hex');
-
-      const kDate = crypto
-        .createHmac('sha256', `AWS4${this.secretAccessKey || 'IAM_SESSION_KEY'}`)
-        .update(dateStamp)
-        .digest();
-      const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
-      const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
-      const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-      const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-      const host = this.endpoint
-        ? new URL(this.endpoint).host
-        : `${this.bucketName}.s3.${this.region}.amazonaws.com`;
-      downloadUrl = `https://${host}/${params.objectKey}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=${encodeURIComponent(
-        credential,
-      )}&X-Amz-Date=${amzDate}&X-Amz-Expires=${expiresInSeconds}&X-Amz-SignedHeaders=host&X-Amz-Signature=${signature}`;
+      downloadUrl = await getSignedUrl(this.s3Client, command, {
+        expiresIn: expiresInSeconds,
+      });
     } else {
-      if (this.accessKeyId && this.secretAccessKey) {
-        const now = new Date();
-        const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-        const dateStamp = amzDate.substring(0, 8);
-        const credential = `${this.accessKeyId}/${dateStamp}/${this.region}/s3/aws4_request`;
+      if (this.s3Client) {
+        const command = new GetObjectCommand({
+          Bucket: this.bucketName,
+          Key: params.objectKey,
+        });
 
-        const stringToSign =
-          `AWS4-HMAC-SHA256\n${amzDate}\n${dateStamp}/${this.region}/s3/aws4_request\n` +
-          crypto.createHash('sha256').update(`GET\n/${params.objectKey}\n\n`).digest('hex');
-
-        const kDate = crypto
-          .createHmac('sha256', `AWS4${this.secretAccessKey}`)
-          .update(dateStamp)
-          .digest();
-        const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
-        const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
-        const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-        const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-        const host = this.endpoint
-          ? new URL(this.endpoint).host
-          : `${this.bucketName}.s3.${this.region}.amazonaws.com`;
-        downloadUrl = `https://${host}/${params.objectKey}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=${encodeURIComponent(
-          credential,
-        )}&X-Amz-Date=${amzDate}&X-Amz-Expires=${expiresInSeconds}&X-Amz-SignedHeaders=host&X-Amz-Signature=${signature}`;
+        downloadUrl = await getSignedUrl(this.s3Client, command, {
+          expiresIn: expiresInSeconds,
+        });
       } else {
         const signature = crypto
           .createHmac('sha256', 'zentra-test-signing-secret')
@@ -495,119 +459,128 @@ export class ObjectStorageService {
   }
 
   /**
-   * Executes signed AWS SigV4 HeadObject query against remote S3-compatible storage.
+   * Executes HeadObject query against remote S3-compatible storage.
    */
   private async executeS3Head(objectKey: string): Promise<ObjectMetadata | null> {
-    if (!this.accessKeyId || !this.secretAccessKey) return null;
+    if (!this.s3Client) return null;
 
+    let res;
     try {
-      const host = this.endpoint
-        ? new URL(this.endpoint).host
-        : `${this.bucketName}.s3.${this.region}.amazonaws.com`;
-      const url = `${this.endpoint || `https://${host}`}/${objectKey}`;
-
-      const now = new Date();
-      const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
-      const dateStamp = amzDate.substring(0, 8);
-      const credentialScope = `${dateStamp}/${this.region}/s3/aws4_request`;
-
-      const canonicalHeaders = `host:${host}\nx-amz-date:${amzDate}\n`;
-      const signedHeaders = 'host;x-amz-date';
-      const emptyPayloadHash = crypto.createHash('sha256').update('').digest('hex');
-      const canonicalRequest = `HEAD\n/${objectKey}\n\n${canonicalHeaders}\n${signedHeaders}\n${emptyPayloadHash}`;
-
-      const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
-
-      const kDate = crypto.createHmac('sha256', `AWS4${this.secretAccessKey}`).update(dateStamp).digest();
-      const kRegion = crypto.createHmac('sha256', kDate).update(this.region).digest();
-      const kService = crypto.createHmac('sha256', kRegion).update('s3').digest();
-      const kSigning = crypto.createHmac('sha256', kService).update('aws4_request').digest();
-      const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-
-      const authHeader = `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-      const res = await fetch(url, {
-        method: 'HEAD',
-        headers: {
-          Host: host,
-          'x-amz-date': amzDate,
-          Authorization: authHeader,
-        },
+      const command = new HeadObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
       });
 
-      if (res.status === 404 || res.status === 403) {
-        return null;
-      }
-
-      if (!res.ok) {
-        this.logger.error(`S3 HeadObject failed with HTTP ${res.status}: ${res.statusText}`);
-        return null;
-      }
-
-      const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
-      const contentType = res.headers.get('content-type') || 'application/octet-stream';
-      const lastModifiedStr = res.headers.get('last-modified');
-      const lastModified = lastModifiedStr ? new Date(lastModifiedStr) : new Date();
-
-      // AWS S3 returns x-amz-checksum-sha256 header as Base64 when uploaded with SHA-256 checksum
-      const s3ChecksumBase64 = res.headers.get('x-amz-checksum-sha256');
-      let checksumSha256 = '';
-
-      if (s3ChecksumBase64) {
-        checksumSha256 = Buffer.from(s3ChecksumBase64, 'base64').toString('hex');
-      } else {
-        // Fallback: fetch object bytes and compute SHA-256 directly
-        checksumSha256 = await this.computeRemoteObjectSha256(objectKey, host, amzDate, credentialScope, kSigning);
-      }
-
-      return {
-        objectKey,
-        contentLength,
-        contentType,
-        checksumSha256,
-        lastModified,
-      };
+      res = await this.s3Client.send(command);
     } catch (err: any) {
-      this.logger.error(`S3 HeadObject network failure for ${objectKey}: ${err.message}`);
-      return null;
+      // 1. Genuine missing object: only 404 / NotFound / NoSuchKey returns null
+      if (
+        err?.name === 'NotFound' ||
+        err?.name === 'NoSuchKey' ||
+        err?.$metadata?.httpStatusCode === 404
+      ) {
+        return null;
+      }
+
+      // 2. Authorization / Permission failure: HTTP 403
+      if (
+        err?.$metadata?.httpStatusCode === 403 ||
+        err?.name === 'AccessDenied' ||
+        err?.name === 'Forbidden'
+      ) {
+        this.logger.error(`S3 Access Denied (HTTP 403) accessing object '${objectKey}' in bucket '${this.bucketName}'`);
+        throw new Error(
+          `S3_ACCESS_DENIED: Access denied when reading storage object '${objectKey}'. Check storage permissions and credentials.`,
+        );
+      }
+
+      // 3. Transient network or storage communication failures (e.g. 5xx, timeout, socket hangup)
+      this.logger.error(`S3 HeadObject communication failure for '${objectKey}': ${err.message}`);
+      throw new Error(
+        `STORAGE_COMMUNICATION_ERROR: Storage communication error when querying object '${objectKey}'.`,
+      );
     }
+
+    const contentLength = res.ContentLength ?? 0;
+    const contentType = res.ContentType || 'application/octet-stream';
+    const lastModified = res.LastModified || new Date();
+
+    // AWS S3 returns ChecksumSHA256 as Base64 when uploaded with SHA-256 checksum
+    const s3ChecksumBase64 = res.ChecksumSHA256;
+    let checksumSha256 = '';
+
+    if (s3ChecksumBase64) {
+      checksumSha256 = Buffer.from(s3ChecksumBase64, 'base64').toString('hex');
+    } else {
+      // Fallback: stream object bytes and compute SHA-256 directly
+      // This is outside the HeadObject catch block so stream/read errors do not masquerade as missing objects
+      checksumSha256 = await this.computeRemoteObjectSha256(objectKey);
+    }
+
+    return {
+      objectKey,
+      contentLength,
+      contentType,
+      checksumSha256,
+      lastModified,
+    };
   }
 
   /**
-   * Fetches remote object bytes and computes SHA-256 digest when x-amz-checksum-sha256 header is absent.
+   * Streams remote object bytes and computes SHA-256 digest when ChecksumSHA256 is absent.
    */
-  private async computeRemoteObjectSha256(
-    objectKey: string,
-    host: string,
-    amzDate: string,
-    credentialScope: string,
-    kSigning: Buffer,
-  ): Promise<string> {
-    const url = `${this.endpoint || `https://${host}`}/${objectKey}`;
-    const canonicalHeaders = `host:${host}\nx-amz-date:${amzDate}\n`;
-    const signedHeaders = 'host;x-amz-date';
-    const emptyPayloadHash = crypto.createHash('sha256').update('').digest('hex');
-    const canonicalRequest = `GET\n/${objectKey}\n\n${canonicalHeaders}\n${signedHeaders}\n${emptyPayloadHash}`;
-
-    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${credentialScope}\n${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
-    const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
-    const authHeader = `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Host: host,
-        'x-amz-date': amzDate,
-        Authorization: authHeader,
-      },
-    });
-
-    if (!res.ok) {
-      throw new Error(`S3 GET for checksum calculation failed with status ${res.status}`);
+  private async computeRemoteObjectSha256(objectKey: string): Promise<string> {
+    if (!this.s3Client) {
+      throw new Error(`S3_FAIL_CLOSED_ERROR: S3 client not initialized for checksum calculation.`);
     }
 
-    const arrayBuffer = await res.arrayBuffer();
-    return crypto.createHash('sha256').update(Buffer.from(arrayBuffer)).digest('hex');
+    let res;
+    try {
+      const command = new GetObjectCommand({
+        Bucket: this.bucketName,
+        Key: objectKey,
+      });
+
+      res = await this.s3Client.send(command);
+    } catch (err: any) {
+      if (
+        err?.$metadata?.httpStatusCode === 403 ||
+        err?.name === 'AccessDenied' ||
+        err?.name === 'Forbidden'
+      ) {
+        this.logger.error(`S3 Access Denied (HTTP 403) streaming object '${objectKey}' for checksum calculation`);
+        throw new Error(
+          `S3_ACCESS_DENIED: Access denied when reading storage object stream for '${objectKey}'.`,
+        );
+      }
+      this.logger.error(`S3 GetObject failure for '${objectKey}': ${err.message}`);
+      throw new Error(
+        `STORAGE_COMMUNICATION_ERROR: Failed to retrieve object stream for '${objectKey}'.`,
+      );
+    }
+
+    if (!res.Body) {
+      throw new Error(`STORAGE_STREAM_READ_ERROR: S3 GET returned empty body stream for '${objectKey}'.`);
+    }
+
+    const hash = crypto.createHash('sha256');
+    const stream = res.Body as Readable;
+
+    try {
+      for await (const chunk of stream) {
+        hash.update(chunk);
+      }
+    } catch (streamErr: any) {
+      if (typeof stream.destroy === 'function') {
+        stream.destroy(streamErr);
+      }
+      this.logger.error(`Storage stream read error for '${objectKey}': ${streamErr.message}`);
+      throw new Error(
+        `STORAGE_STREAM_READ_ERROR: Stream read interrupted during checksum calculation for '${objectKey}'.`,
+      );
+    }
+
+    return hash.digest('hex');
   }
 
   /**
